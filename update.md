@@ -2,6 +2,32 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-20：优化默认预设破限与抗AI内容
+
+### 背景
+
+参考【预设参考】下 4 份最新预设（狐神抚 V18.8、仓鼠之神 V3、梦鲸思客 V4、夏瑾 天琴座）中关于破限与抗AI的最新技法，重写并增强默认预设 `default_preset.json` 的相关模块。
+
+### 核心改动
+
+1. **破限层（5 档重写，不新增档位）**：`nf_jb_low/mid/high/cot/prefill` 内容重写为最新技法——高密度人设锚（绝不拒绝/无条件服从）+ 非评判 + 思维链非评判启动锚（"以'嗯'开始"）+ 助手预填充升级；保持互斥关系与默认关闭状态。
+2. **抗八股增强**：`nf_anti_bagua` 融入"去欧规范"正反例（全肯定句式/时间码叙事/禁破折号/禁下定义/客观视角/动词推进/微动作限制/骨骼医学术语禁用/环境三句封顶/物理转场/口语填充/对话不解释/禁递增排比）与防全知"感官边界/认知边界"。
+3. **抗重复增强**：`nf_anti_repetition` 新增第八节"输出唯一性与强制推进（反多版本）"。
+4. **新增 2 个抗AI模块（默认开启）**：`nf_anti_mechanical`（禁止机械词语/报告腔/数值/医学术语）与 `nf_anti_metaphor`（禁止滥用比喻/套路比喻黑名单）；`prompts` 与 `prompt_order` 均 23→25 条且一一对应。
+
+> 注意：本地已存在 `default.json` 的存量用户不会自动获得新模块，需在预设管理中执行"重置默认预设"同步到内置最新版本。
+
+### 测试
+
+- JSON 合法性校验 + `WritingPreset.model_validate` 加载（25 条 prompts/order 一一对应）
+- `pytest tests/test_preset_models.py tests/test_m2_prompt_assembly.py` 全部通过（33 个）
+- `pytest tests/test_e2e_workflow.py`：25 通过、2 失败（`test_context_extractor_with_mock_llm`/`test_context_extraction_caching`，系 MagicMock 无法 await 的存量问题，在未改动的 HEAD 上同样复现，与本次改动无关）
+
+### 文档同步
+
+- `agent.md`：`default_preset.json` 描述 23→25 条 + 新增两抗AI模块与破限重写说明
+- `update.md`：本条目（不升版本号）
+
 ## 2026-08-15：Claude Fable/Opus 4.7+ 采样参数过滤
 
 ### 背景
