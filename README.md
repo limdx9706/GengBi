@@ -2,7 +2,7 @@
 
 > 古意盎然的小说续写桌面工具——辅助创作者在既有故事之后接续新篇，而非替代写作。
 
-**当前版本：v0.2.19**
+**当前版本：v0.2.20**
 
 赓笔（gēng bǐ）取"赓续笔墨"之意。"赓"本义为接续他人诗文，正契合本工具的定位：在你已写就的章节之后，借助大语言模型续写后续内容，让故事自然生长。
 
@@ -48,14 +48,14 @@ python main.py
 ### 打包为可执行文件
 
 ```bash
-# 当前平台打包（生成 dist/GengBi_v{版本号} 可执行文件，如 GengBi_v0.2.16.exe）
+# 当前平台打包（生成 dist/GengBi_v{版本号} 可执行文件，如 GengBi_v0.2.20.exe）
 python -m novelforge.resources.build
 
 # 或直接调用 PyInstaller
 pyinstaller --clean -y novelforge/resources/build.spec
 ```
 
-> **自动打包发布**：推送 `v*` 版本 tag（如 `v0.2.19`）后，GitHub Actions 会自动在 Windows 上打包 exe 并发布 GitHub Release（Release 说明自动提取自本文件「更新记录」对应版本小节）；也可在仓库 Actions 页面手动触发「Build & Release」工作流。
+> **自动打包发布**：推送 `v*` 版本 tag（如 `v0.2.20`）后，GitHub Actions 会自动在 Windows 上打包 exe 并发布 GitHub Release（Release 说明自动提取自本文件「更新记录」对应版本小节）；也可在仓库 Actions 页面手动触发「Build & Release」工作流。
 
 ## 配置说明
 
@@ -275,6 +275,12 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 在主窗口菜单栏「调试」勾选「调试模式」，可在每个 LLM 调用前预览组装后的完整 messages（含宏替换与模板渲染后的最终文本），确认变量是否正确注入。
 
 ## 更新记录
+
+### v0.2.20
+
+- 增强默认预设：破限层与抗 AI 模块重写优化，新增「抗机械感」「抗套路比喻」模块（默认开启）；补充全员成年（18+）与虚构声明，减少因未成年顾虑导致的拒写。已有本地默认预设的用户需在预设管理中执行「重置默认预设」才能同步到最新内置版
+- 修复 Claude Fable / Mythos / Opus 4.7+ 因请求携带 `temperature`/`top_p` 导致的 `400 top_p is deprecated`
+- 修复提取失败后功能按钮与下一行重叠的问题
 
 ### v0.2.19
 
