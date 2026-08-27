@@ -492,7 +492,6 @@
     "max_tokens": 32000,
     "max_context": 2000000,
     "frequency_penalty": 0.0,
-    "presence_penalty": 0.0,
-    "reasoning_effort": "high"
+    "presence_penalty": 0.0
   }
 }

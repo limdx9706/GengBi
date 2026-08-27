@@ -1102,22 +1102,17 @@ class MainWindow(QMainWindow):
         if target_ep_id:
             self.continuation_panel.select_endpoint_by_id(target_ep_id)
 
-    def _resolve_reasoning_effort(
-        self, endpoint: dict, preset: WritingPreset | None = None
-    ) -> str:
-        """解析思考强度：预设级优先（更具体），其次端点级，均空则不发送。
+    def _resolve_reasoning_effort(self, endpoint: dict) -> str:
+        """解析思考强度：仅读取端点配置，空串表示不发送。
+
+        预设 generation_params 中的 reasoning_effort 已废弃，不再参与解析。
 
         Args:
             endpoint: API 端点配置 dict
-            preset: 写作预设（可选），其 generation_params.reasoning_effort 优先
 
         Returns:
             reasoning_effort 字符串，空串表示不发送
         """
-        if preset:
-            re = preset.generation_params.get("reasoning_effort", "")
-            if re and re.lower() not in {"none", "off"}:
-                return re
         return endpoint.get("reasoning_effort", "") or ""
 
     def _get_flow_jailbreak_text(self, flow_key: str) -> str:
@@ -2132,8 +2127,8 @@ class MainWindow(QMainWindow):
         # 初始化按章节缓冲的流式输出（切回时恢复 UI）
         self._continuation_stream_text_by_chapter[self._continuation_chapter_id] = ""
 
-        # 注入思考强度（预设级优先，其次端点级）
-        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint, preset)
+        # 注入思考强度（仅端点级）
+        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint)
 
         # 创建并启动 worker（M4: 注入 extracted_context_snapshot）
         self._continuation_worker = ContinuationWorker(
@@ -2483,8 +2478,8 @@ class MainWindow(QMainWindow):
         self._volume_completed_phases = []
         self.continuation_panel.volume_panel.reset()
 
-        # 注入思考强度（预设级优先，其次端点级）
-        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint, preset)
+        # 注入思考强度（仅端点级）
+        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint)
 
         return {
             "endpoint": endpoint,
@@ -2814,7 +2809,7 @@ class MainWindow(QMainWindow):
         regex_script_ids = [s.id for s, _ in ordered_scripts]
 
         # 注入 reasoning_effort（与 _prepare_volume_run 一致）
-        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint, preset)
+        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint)
 
         # 构建 prepare_data
         prepare_data = {
@@ -6503,8 +6498,8 @@ class MainWindow(QMainWindow):
         origin_chapter = self.storage_service.load_chapter(audit_cid)
         chapter_metadata = dict(origin_chapter.metadata) if origin_chapter else {}
 
-        # 注入思考强度（重写是续写任务，用续写端点+预设）
-        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint, preset)
+        # 注入思考强度（重写续写：续写端点，仅端点级）
+        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint)
 
         # 创建修正 worker（created_by 标记为 audit_rewrite）
         self._continuation_worker = ContinuationWorker(
@@ -7048,10 +7043,10 @@ class MainWindow(QMainWindow):
         self._continuation_chapter_id = rewrite_cid
         self._continuation_stream_text_by_chapter[rewrite_cid] = ""
 
-        # 注入思考强度（重写是续写任务，用 single_continuation 端点+预设）
+        # 注入思考强度（重写续写：single_continuation 端点，仅端点级）
         # 复用 single_continuation 端点（与单章续写一致）
         single_endpoint = self.config_manager.get_flow_endpoint("single_continuation") or endpoint
-        params["reasoning_effort"] = self._resolve_reasoning_effort(single_endpoint, preset)
+        params["reasoning_effort"] = self._resolve_reasoning_effort(single_endpoint)
 
         # 创建生成 worker（created_by="rewrite_current" 标识重写当前章节 swipe）
         self._continuation_worker = ContinuationWorker(

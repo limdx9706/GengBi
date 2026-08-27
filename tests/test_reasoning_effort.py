@@ -1,13 +1,32 @@
-"""思考强度（reasoning_effort）注入测试。
+"""思考强度（reasoning_effort）注入与 Qwen thinking_budget 清洗测试。
 
 覆盖：
 - LLMClient 的 reasoning_effort 属性存储与 payload 注入条件
-- MainWindow._resolve_reasoning_effort 的预设级优先/端点级回退/均空逻辑
+- MainWindow._resolve_reasoning_effort 仅读端点配置
+- Qwen 模型 thinking_budget 清洗（flash/max/extra_payload）
 """
 from __future__ import annotations
 
 from novelforge.models.preset import WritingPreset
-from novelforge.services.llm_client import LLMClient
+from novelforge.services.llm_client import LLMClient, QWEN_THINKING_BUDGET_MAX
+
+
+def _apply_extensions(
+    model: str,
+    *,
+    reasoning_effort: str = "",
+    extra_payload: dict | None = None,
+) -> dict:
+    """构建最小 payload 并走 _apply_payload_extensions。"""
+    client = LLMClient(
+        "https://api.example.com/v1",
+        "sk-test",
+        reasoning_effort=reasoning_effort or None,
+        extra_payload=extra_payload,
+    )
+    payload: dict = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+    client._apply_payload_extensions(payload, model)
+    return payload
 
 
 # ===== LLMClient reasoning_effort 属性与注入条件 =====
@@ -79,8 +98,8 @@ def _make_main_window_stub():
     return win
 
 
-def test_resolve_reasoning_effort_preset_priority() -> None:
-    """预设级 reasoning_effort 优先于端点级。"""
+def test_resolve_reasoning_effort_ignores_preset() -> None:
+    """预设 reasoning_effort 不再参与解析，仅读端点。"""
     win = _make_main_window_stub()
     preset = WritingPreset(
         id="test-preset",
@@ -88,63 +107,53 @@ def test_resolve_reasoning_effort_preset_priority() -> None:
         generation_params={"reasoning_effort": "max"},
     )
     endpoint = {"reasoning_effort": "low"}
-    result = win._resolve_reasoning_effort(endpoint, preset)
-    assert result == "max"
+    result = win._resolve_reasoning_effort(endpoint)
+    assert result == "low"
+    _ = preset  # 预设字段存在但不被读取
 
 
-def test_resolve_reasoning_effort_preset_none_off_ignored() -> None:
-    """预设 reasoning_effort 为 none/off 时忽略，回退端点级。"""
+def test_resolve_reasoning_effort_preset_high_endpoint_empty() -> None:
+    """预设 high、端点空时返回空串（不发送）——修复默认预设带崩 flash。"""
     win = _make_main_window_stub()
-    for val in ("none", "off"):
-        preset = WritingPreset(
-            id="test-preset",
-            name="test",
-            generation_params={"reasoning_effort": val},
-        )
-        endpoint = {"reasoning_effort": "high"}
-        result = win._resolve_reasoning_effort(endpoint, preset)
-        assert result == "high", f"预设值 {val!r} 应被忽略，回退端点 high"
-
-
-def test_resolve_reasoning_effort_endpoint_fallback() -> None:
-    """预设 reasoning_effort 为空时用端点级。"""
-    win = _make_main_window_stub()
-    preset = WritingPreset(
+    _preset = WritingPreset(
         id="test-preset",
         name="test",
-        generation_params={"reasoning_effort": ""},
+        generation_params={"reasoning_effort": "high"},
     )
+    endpoint: dict = {"reasoning_effort": ""}
+    result = win._resolve_reasoning_effort(endpoint)
+    assert result == ""
+
+
+def test_resolve_reasoning_effort_endpoint_value() -> None:
+    """端点 reasoning_effort 直接返回。"""
+    win = _make_main_window_stub()
     endpoint = {"reasoning_effort": "medium"}
-    result = win._resolve_reasoning_effort(endpoint, preset)
+    result = win._resolve_reasoning_effort(endpoint)
     assert result == "medium"
 
 
 def test_resolve_reasoning_effort_no_preset() -> None:
-    """无预设时用端点级。"""
+    """端点配置直接返回。"""
     win = _make_main_window_stub()
     endpoint = {"reasoning_effort": "low"}
-    result = win._resolve_reasoning_effort(endpoint, None)
+    result = win._resolve_reasoning_effort(endpoint)
     assert result == "low"
 
 
-def test_resolve_reasoning_effort_both_empty() -> None:
-    """预设与端点均空时返回空串（不发送）。"""
+def test_resolve_reasoning_effort_empty() -> None:
+    """端点为空时返回空串（不发送）。"""
     win = _make_main_window_stub()
-    preset = WritingPreset(
-        id="test-preset",
-        name="test",
-        generation_params={"reasoning_effort": ""},
-    )
     endpoint = {"reasoning_effort": ""}
-    result = win._resolve_reasoning_effort(endpoint, preset)
+    result = win._resolve_reasoning_effort(endpoint)
     assert result == ""
 
 
 def test_resolve_reasoning_effort_endpoint_missing_field() -> None:
     """端点无 reasoning_effort 字段时返回空串。"""
     win = _make_main_window_stub()
-    endpoint = {}
-    result = win._resolve_reasoning_effort(endpoint, None)
+    endpoint: dict = {}
+    result = win._resolve_reasoning_effort(endpoint)
     assert result == ""
 
 
@@ -381,3 +390,88 @@ def test_filter_unsupported_params_legacy_claude_keeps_sampling() -> None:
         assert payload["temperature"] == 0.7
         assert payload["top_p"] == 0.9
         assert payload["presence_penalty"] == 0.5
+
+
+# ===== Qwen thinking_budget 清洗 =====
+
+
+def test_qwen38_flash_high_no_reasoning_effort_or_invalid_budget() -> None:
+    """qwen3.8-flash + high：不发 reasoning_effort，不发非法 thinking_budget。"""
+    for model in ("qwen3.8-flash", "qwen3.8flash", "Qwen/Qwen3.8-Flash"):
+        payload = _apply_extensions(model, reasoning_effort="high")
+        assert "reasoning_effort" not in payload
+        assert "thinking_budget" not in payload
+
+
+def test_qwen38_flash_low_maps_to_budget() -> None:
+    """qwen3.8-flash + low → thinking_budget=4096。"""
+    payload = _apply_extensions("qwen3.8-flash", reasoning_effort="low")
+    assert "reasoning_effort" not in payload
+    assert payload["thinking_budget"] == 4096
+
+
+def test_qwen38_flash_empty_effort_uses_model_default() -> None:
+    """端点未配置思考强度时，不注入 enable_thinking=False，走模型默认。"""
+    payload = _apply_extensions("qwen3.8-flash", reasoning_effort="")
+    assert "reasoning_effort" not in payload
+    assert "thinking_budget" not in payload
+    assert "enable_thinking" not in payload
+
+
+def test_qwen38_flash_none_disables_thinking() -> None:
+    """qwen3.8-flash + none → enable_thinking=False。"""
+    payload = _apply_extensions("qwen3.8-flash", reasoning_effort="none")
+    assert payload.get("enable_thinking") is False
+    assert "thinking_budget" not in payload
+
+
+def test_qwen_extra_payload_budget_zero_removed() -> None:
+    """extra_payload thinking_budget=0 不发出，并关闭思考。"""
+    payload = _apply_extensions(
+        "qwen3.8-flash",
+        extra_payload={"thinking_budget": 0},
+    )
+    assert "thinking_budget" not in payload
+    assert payload.get("enable_thinking") is False
+
+
+def test_qwen_extra_payload_budget_high_string_removed() -> None:
+    """extra_payload thinking_budget='high' 字符串不原样发出。"""
+    payload = _apply_extensions(
+        "qwen3.8-flash",
+        extra_payload={"thinking_budget": "high"},
+    )
+    assert "thinking_budget" not in payload
+
+
+def test_qwen_extra_payload_budget_clamped() -> None:
+    """extra_payload thinking_budget 超上限钳到 262144。"""
+    payload = _apply_extensions(
+        "qwen3.8-flash",
+        extra_payload={"thinking_budget": 999_999},
+    )
+    assert payload["thinking_budget"] == QWEN_THINKING_BUDGET_MAX
+
+
+def test_qwen38_max_high_keeps_reasoning_effort() -> None:
+    """qwen3.8-max + high 仍发 reasoning_effort。"""
+    payload = _apply_extensions("qwen3.8-max", reasoning_effort="high")
+    assert payload.get("reasoning_effort") == "high"
+    assert "thinking_budget" not in payload
+
+
+def test_qwen38_max_budget_wins_over_effort() -> None:
+    """qwen3.8-max + effort + extra budget：只保留 budget。"""
+    payload = _apply_extensions(
+        "qwen3.8-max",
+        reasoning_effort="high",
+        extra_payload={"thinking_budget": 1024},
+    )
+    assert payload["thinking_budget"] == 1024
+    assert "reasoning_effort" not in payload
+
+
+def test_non_qwen_high_unchanged() -> None:
+    """非 Qwen 模型 high 仍发 reasoning_effort。"""
+    payload = _apply_extensions("gpt-4o", reasoning_effort="high")
+    assert payload.get("reasoning_effort") == "high"

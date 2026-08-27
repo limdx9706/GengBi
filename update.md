@@ -2,6 +2,35 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-27：v0.2.21 发版——思考强度改由端点控制 + 修复 Qwen thinking_budget 400
+
+### 背景
+
+使用 qwen3.8-flash 时，DashScope/中转返回 400：`thinking_budget` 必须是 1–262144 的正整数。根因之一是默认预设 `generation_params.reasoning_effort="high"` 优先于端点「不发送」，网关将档位字符串错误映射为非法 `thinking_budget`。用户要求取消预设管理器中的思考强度，统一由端点配置。
+
+### 核心改动
+
+1. **思考强度仅端点控制**
+   - `preset_manager.py` 移除「推理强度」下拉及保存逻辑
+   - `default_preset.json` 删除 `generation_params.reasoning_effort`
+   - `main_window._resolve_reasoning_effort(endpoint)` 只读端点，忽略预设（存量预设字段不参与解析）
+   - `settings_dialog` 端点「思考强度」保留为唯一入口，tooltip 说明预设不再覆盖
+
+2. **Qwen 思考参数清洗（`llm_client.py`）**
+   - 新增 `_apply_payload_extensions`：统一 reasoning_effort 注入 → 模型过滤 → extra_payload merge → Qwen 清洗
+   - `_sanitize_qwen_thinking_params`：qwen3.8-max 保留 `reasoning_effort`（与 `thinking_budget` 冲突时 budget 优先）；qwen3.8-flash 及其余 Qwen 不发 `reasoning_effort`，档位转 `thinking_budget`/`enable_thinking`；非法 budget（0/非整数/>262144）删除或钳制
+
+### 测试
+
+- `pytest tests/test_reasoning_effort.py -q`：39 通过（含端点-only 解析 + Qwen 清洗 10 场景）
+- `pytest tests/test_preset_models.py -q`：23 通过
+
+### 文档同步
+
+- `agent.md`：preset_manager/llm_client/settings_dialog 描述更新；版本 → v0.2.21
+- `README.md`：更新记录 v0.2.21、配置说明补充端点思考强度
+- `update.md`：本条目
+
 ## 2026-08-23：v0.2.20 发版——默认预设增强 + Claude 采样过滤 + Flow 按钮重叠修复
 
 ### 背景

@@ -25,6 +25,22 @@ logger = logging.getLogger(__name__)
 # 流式中断保留的最小字符数
 MIN_INTERRUPT_CHARS = 100
 
+# Qwen/DashScope thinking_budget 上限（qwen3.8-flash 为 256K）
+QWEN_THINKING_BUDGET_MAX = 262144
+
+# reasoning_effort 档位 → thinking_budget 映射（None=不设 budget，走模型默认）
+_QWEN_EFFORT_BUDGET_MAP: dict[str, int | None] = {
+    "none": None,
+    "off": None,
+    "low": 4096,
+    "minimal": 4096,
+    "medium": 16384,
+    "high": None,
+    "max": None,
+    "auto": None,
+    "xhigh": None,
+}
+
 
 class LLMError(Exception):
     """LLM API 调用基础异常。"""
@@ -270,6 +286,158 @@ class LLMClient:
         if payload.get("frequency_penalty") == 0.0:
             payload.pop("frequency_penalty", None)
 
+    @staticmethod
+    def _normalize_model_key(model: str) -> str:
+        """归一化模型名用于 Qwen 族检测（去掉 . _ - / 等分隔符）。"""
+        return (
+            model.lower()
+            .replace(".", "")
+            .replace("_", "")
+            .replace("-", "")
+            .replace("/", "")
+        )
+
+    @staticmethod
+    def _is_qwen_model(model: str) -> bool:
+        """检测是否为 Qwen/QwQ 模型。"""
+        if not model:
+            return False
+        key = LLMClient._normalize_model_key(model)
+        return "qwen" in key or key.startswith("qwq")
+
+    @staticmethod
+    def _is_qwen38_max_model(model: str) -> bool:
+        """检测是否为 qwen3.8-max 族（支持 reasoning_effort 档位）。"""
+        key = LLMClient._normalize_model_key(model)
+        return "qwen38max" in key
+
+    @staticmethod
+    def _effort_to_thinking_budget(effort: str) -> int | None:
+        """将 reasoning_effort 档位映射为 thinking_budget（None=不设 budget）。"""
+        return _QWEN_EFFORT_BUDGET_MAP.get(effort.lower())
+
+    @staticmethod
+    def _coerce_thinking_budget(value: Any) -> int | None:
+        """将 thinking_budget 原始值规范为 1..QWEN_THINKING_BUDGET_MAX 或 None。
+
+        非数字字符串（如档位名 high）按档位映射；<=0 返回 None（调用方处理 disable）。
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            lower = stripped.lower()
+            if lower in {"none", "off", "false"}:
+                return None
+            if lower in _QWEN_EFFORT_BUDGET_MAP:
+                return LLMClient._effort_to_thinking_budget(lower)
+            try:
+                num = int(stripped)
+            except ValueError:
+                return None
+        elif isinstance(value, float):
+            if value != int(value):
+                return None
+            num = int(value)
+        elif isinstance(value, int):
+            num = value
+        else:
+            return None
+
+        if num <= 0:
+            return None
+        if num > QWEN_THINKING_BUDGET_MAX:
+            return QWEN_THINKING_BUDGET_MAX
+        return num
+
+    @staticmethod
+    def _sanitize_thinking_budget_field(container: dict) -> bool:
+        """清洗 container 中的 thinking_budget，返回是否应关闭思考（显式 0/none/off）。
+
+        原地修改 container。
+        """
+        if "thinking_budget" not in container:
+            return False
+        raw = container["thinking_budget"]
+        if raw == 0 or (isinstance(raw, str) and raw.strip() in {"0", "0.0"}):
+            container.pop("thinking_budget", None)
+            return True
+        if isinstance(raw, str) and raw.strip().lower() in {"none", "off", "false"}:
+            container.pop("thinking_budget", None)
+            return True
+        budget = LLMClient._coerce_thinking_budget(raw)
+        if budget is None:
+            container.pop("thinking_budget", None)
+        else:
+            container["thinking_budget"] = budget
+        return False
+
+    def _sanitize_qwen_thinking_params(self, payload: dict, model: str) -> None:
+        """按 Qwen 模型族清洗思考参数（必须在 extra_payload merge 之后调用）。
+
+        - qwen3.8-max：保留 reasoning_effort；与 thinking_budget 冲突时 budget 优先
+        - 其余 Qwen：不发 reasoning_effort，档位转 thinking_budget 或 enable_thinking
+        """
+        if not self._is_qwen_model(model):
+            return
+
+        extra_body = payload.get("extra_body")
+        extra_body_dict = extra_body if isinstance(extra_body, dict) else None
+
+        disable_from_payload = self._sanitize_thinking_budget_field(payload)
+        disable_from_extra = False
+        if extra_body_dict is not None:
+            disable_from_extra = self._sanitize_thinking_budget_field(extra_body_dict)
+
+        has_budget = (
+            "thinking_budget" in payload
+            or (extra_body_dict is not None and "thinking_budget" in extra_body_dict)
+        )
+
+        if self._is_qwen38_max_model(model):
+            # max 族：保留 reasoning_effort；budget 与 effort 同时存在时 budget 优先
+            if has_budget:
+                payload.pop("reasoning_effort", None)
+            elif disable_from_payload or disable_from_extra:
+                payload["enable_thinking"] = False
+            return
+
+        # flash 及其余 Qwen：移除 reasoning_effort，按档位转换
+        effort_raw = payload.pop("reasoning_effort", None) or self.reasoning_effort or ""
+        effort = effort_raw.strip().lower() if isinstance(effort_raw, str) else ""
+
+        if disable_from_payload or disable_from_extra:
+            payload["enable_thinking"] = False
+            return
+
+        if has_budget:
+            # 用户 extra_payload 已提供合法 budget，不再注入档位
+            return
+
+        if effort in {"none", "off"}:
+            payload["enable_thinking"] = False
+            return
+
+        if not effort:
+            # 端点未配置（空串）：不注入任何思考参数，走模型默认（flash 默认开启思考）
+            return
+
+        budget = self._effort_to_thinking_budget(effort)
+        if budget is not None:
+            payload["thinking_budget"] = budget
+
+    def _apply_payload_extensions(self, payload: dict, model: str) -> None:
+        """注入思考强度、过滤不支持参数、合并 extra_payload、清洗 Qwen 思考参数。"""
+        effort = self._resolve_reasoning_effort_for_payload(model)
+        if effort:
+            payload["reasoning_effort"] = effort
+        self._filter_unsupported_params(payload, model)
+        if self.extra_payload:
+            _deep_merge_dict(payload, self.extra_payload)
+        self._sanitize_qwen_thinking_params(payload, model)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取复用的 aiohttp.ClientSession（懒加载）。
 
@@ -333,15 +501,7 @@ class LLMClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        # 思考强度：根据模型类型解析（Gemini 等模型需映射不支持的值）
-        effort = self._resolve_reasoning_effort_for_payload(model)
-        if effort:
-            payload["reasoning_effort"] = effort
-        # 按模型类型过滤不支持的参数（Grok 等）
-        self._filter_unsupported_params(payload, model)
-        # 自定义 payload 字段 deep merge（如 zenmux provider_routing_strategy）
-        if self.extra_payload:
-            _deep_merge_dict(payload, self.extra_payload)
+        self._apply_payload_extensions(payload, model)
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -607,15 +767,7 @@ class LLMClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        # 思考强度：根据模型类型解析（Gemini 等模型需映射不支持的值）
-        effort = self._resolve_reasoning_effort_for_payload(model)
-        if effort:
-            payload["reasoning_effort"] = effort
-        # 按模型类型过滤不支持的参数（Grok/Gemini 等）
-        self._filter_unsupported_params(payload, model)
-        # 自定义 payload 字段 deep merge（如 zenmux provider_routing_strategy）
-        if self.extra_payload:
-            _deep_merge_dict(payload, self.extra_payload)
+        self._apply_payload_extensions(payload, model)
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

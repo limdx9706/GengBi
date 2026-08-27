@@ -2,7 +2,7 @@
 
 > 古意盎然的小说续写桌面工具——辅助创作者在既有故事之后接续新篇，而非替代写作。
 
-**当前版本：v0.2.20**
+**当前版本：v0.2.21**
 
 赓笔（gēng bǐ）取"赓续笔墨"之意。"赓"本义为接续他人诗文，正契合本工具的定位：在你已写就的章节之后，借助大语言模型续写后续内容，让故事自然生长。
 
@@ -48,20 +48,20 @@ python main.py
 ### 打包为可执行文件
 
 ```bash
-# 当前平台打包（生成 dist/GengBi_v{版本号} 可执行文件，如 GengBi_v0.2.20.exe）
+# 当前平台打包（生成 dist/GengBi_v{版本号} 可执行文件，如 GengBi_v0.2.21.exe）
 python -m novelforge.resources.build
 
 # 或直接调用 PyInstaller
 pyinstaller --clean -y novelforge/resources/build.spec
 ```
 
-> **自动打包发布**：推送 `v*` 版本 tag（如 `v0.2.20`）后，GitHub Actions 会自动在 Windows 上打包 exe 并发布 GitHub Release（Release 说明自动提取自本文件「更新记录」对应版本小节）；也可在仓库 Actions 页面手动触发「Build & Release」工作流。
+> **自动打包发布**：推送 `v*` 版本 tag（如 `v0.2.21`）后，GitHub Actions 会自动在 Windows 上打包 exe 并发布 GitHub Release（Release 说明自动提取自本文件「更新记录」对应版本小节）；也可在仓库 Actions 页面手动触发「Build & Release」工作流。
 
 ## 配置说明
 
 首次启动后，请前往"设置"配置：
 
-1. **API 端点**：填写 base_url、API Key、默认模型
+1. **API 端点**：填写 base_url、API Key、默认模型；可选配置**思考强度**（`reasoning_effort`，7 档含「不发送」），仅由端点控制，预设不再覆盖。使用 Qwen3.8-flash 等 DashScope 模型时建议选「不发送」或 `low`/`medium`，由客户端自动转换为合法的 `thinking_budget`
 2. **提取模型**（可选）：上下文提取使用的模型，留空则使用端点默认模型
 3. **续写参数**：温度、回溯章节数（启动时自动加载上次设置）
 4. **Token 拆分限制**：上下文提取的单批 Token 上限（不限制 / 50k / 100k / 250k / 500k）
@@ -275,6 +275,11 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 在主窗口菜单栏「调试」勾选「调试模式」，可在每个 LLM 调用前预览组装后的完整 messages（含宏替换与模板渲染后的最终文本），确认变量是否正确注入。
 
 ## 更新记录
+
+### v0.2.21
+
+- 移除预设管理器「推理强度」
+- 修复 Qwen3.8-flash 400问题
 
 ### v0.2.20
 

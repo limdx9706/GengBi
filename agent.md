@@ -6,7 +6,7 @@
 
 赓笔 (GengBi) 是一个 SillyTavern (ST) 兼容的小说续写工具，提供从 TXT 导入、章节管理、上下文提取、提示词组装到 LLM 流式续写的完整工作流。
 
-**当前版本：v0.2.20**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
+**当前版本：v0.2.21**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
 
 **版本更新记录**：维护在 `README.md` 的"更新记录"章节，按版本倒序排列，每次发版须追加新版本小节。
 
@@ -48,7 +48,7 @@ novelforge/
 │   ├── audit_worker.py          # 单章续写审计 worker（默认流式 stream_chat_completion，prefer_non_stream 时 chat_completion 一次性推送；低温稳定输出；调试模式镜像 ContinuationWorker，phase_name 参数化 单章审计/重写需求分析）
 │   ├── custom_audit_rule_service.py  # 自定义设定结构化解析（parse_rule_streaming 走 complete_text，stream=not config.is_prefer_non_stream()，AI 结合世界观+上下文结构化为 requirement+audit_criteria）
 │   ├── volume_orchestrator.py   # 卷级多章节续写编排器（QThread+asyncio，7 阶段流程 + 暂停点 + 调试模式；分阶段执行 phase/phase_inputs/phase_output 信号支持 volume_phase agent；chapter_step_started 信号驱动逐章子步骤进度（细纲/写作/验证/修订）；章节正文生成经 _generate_chapter_text 统一分支 prefer_non_stream；调试模式支持运行时端点/模型覆盖（_effective_model/_effective_client + endpoint_id 缓存 LLMClient）；run() finally 关闭主+调试缓存 LLMClient 释放 aiohttp session；构造接收 world_ontology/protagonist_profile/style_profile/custom_audit_rules 4 档案，9 处 macros 字典注入 {{style_profile}}，_format_style_profile 序列化辅助；_run_chapter_writing 的 assemble() 调用传齐 4 档案参数；_run_chapter_revise 已移除——新流程审计后直接用 _run_chapter_rewrite 重写，审计报告整体即修改意见，不再单独生成修订指导；_run_chapter_loop 卷第一章 previous_chapter_text 初始化为 self.current_chapter.content 保证衔接插入点章节）
-│   ├── llm_client.py            # LLM 客户端（流式 + 非流式；构造函数接收 extra_payload/extra_headers/proxy 端点级自定义扩展与网络代理，stream/chat_completion/fetch_models 三处请求均传 proxy=self.proxy or None 给 aiohttp session；proxy 空串/纯空白自动归一为 None；生成请求 request_timeout=total=None+sock_read（流式/非流式对齐，避免 prefer_non_stream 时长生成被 total 误杀），短请求 timeout 仍 total；complete_text 统一文本生成入口按 stream 分支 stream_chat_completion/chat_completion 并可选 on_chunk；_deep_merge_dict 模块级辅助函数——dict 递归合并、list/scalar 覆盖；reasoning_effort 按模型映射——Gemini 仅支持 low/medium/high，auto 不发送、minimal→low、max→high；_filter_unsupported_params 按模型删除不支持参数——xAI Grok 全系列删 presence/frequency_penalty（非 grok-3-mini 删 reasoning_effort），Gemini 删 presence/frequency_penalty（含 0.0，避免 400 INVALID_ARGUMENT），Claude Fable/Mythos/Opus 4.7+ 删 temperature/top_p/top_k（避免 400 top_p is deprecated），其余模型 penalty==0.0 时省略；_ensure_user_message 兜底——messages 全为 system 时将末条改为 user 副本，修复 Gemini 兼容网关 contents 为空 500 错误）
+│   ├── llm_client.py            # LLM 客户端（流式 + 非流式；构造函数接收 extra_payload/extra_headers/proxy 端点级自定义扩展与网络代理，stream/chat_completion/fetch_models 三处请求均传 proxy=self.proxy or None 给 aiohttp session；proxy 空串/纯空白自动归一为 None；生成请求 request_timeout=total=None+sock_read（流式/非流式对齐，避免 prefer_non_stream 时长生成被 total 误杀），短请求 timeout 仍 total；complete_text 统一文本生成入口按 stream 分支 stream_chat_completion/chat_completion 并可选 on_chunk；_deep_merge_dict 模块级辅助函数——dict 递归合并、list/scalar 覆盖；_apply_payload_extensions 统一注入 reasoning_effort、_filter_unsupported_params、extra_payload merge 与 Qwen 思考参数清洗；reasoning_effort 按模型映射——Gemini 仅支持 low/medium/high，auto 不发送、minimal→low、max→high；Qwen 清洗——qwen3.8-max 保留 reasoning_effort（与 thinking_budget 冲突时 budget 优先），qwen3.8-flash 及其余 Qwen 不发 reasoning_effort 并按档位转 thinking_budget/enable_thinking，thinking_budget 非法值（0/非整数/>262144）钳制或删除；_filter_unsupported_params 按模型删除不支持参数——xAI Grok 全系列删 presence/frequency_penalty（非 grok-3-mini 删 reasoning_effort），Gemini 删 presence/frequency_penalty（含 0.0，避免 400 INVALID_ARGUMENT），Claude Fable/Mythos/Opus 4.7+ 删 temperature/top_p/top_k（避免 400 top_p is deprecated），其余模型 penalty==0.0 时省略；_ensure_user_message 兜底——messages 全为 system 时将末条改为 user 副本，修复 Gemini 兼容网关 contents 为空 500 错误）
 │   ├── preset_service.py        # 预设管理（reset_default_preset 同步内置最新版）
 │   ├── regex_service.py         # 正则脚本管理（global/scoped/preset）
 │   ├── importer.py              # TXT 导入与章节拆分
@@ -71,11 +71,11 @@ novelforge/
 │   ├── chapter_confirm_dialog.py # 每章后暂停点（通过/不通过+反馈/取消）
 │   ├── artifact_detail_dialog.py # 阶段产物完整内容查看
 │   ├── debug_prompt_dialog.py   # 调试提示词预览 + 端点/模型覆盖选择（显示阶段名+messages JSON + 端点/模型下拉，发送/取消按钮；端点切换按 enabled_models→models→[default_model] 回退链填充模型）
-│   ├── preset_manager.py        # 预设管理器（7 按钮；6 生成参数含 reasoning_effort 5 档）
+│   ├── preset_manager.py        # 预设管理器（7 按钮；5 生成参数 temperature/max_tokens/max_context/top_p/top_k；reasoning_effort 已移除，改由端点 settings 控制）
 │   ├── flow_plugin_manager.py   # 流程插件管理器（列表/详情/导入导出/删除；继承 PersistentDialog 非模态；plugin_changed 信号通知 MainWindow 刷新面板下拉）
 │   ├── regex_manager.py         # 正则管理器（内联勾选即时持久化）
 │   ├── worldbook_manager.py     # 世界书管理器（条目级 enabled 开关）
-│   ├── settings_dialog.py       # 设置对话框（API 端点管理含 models 全部列表 + enabled_models 可勾选多选 QListWidget + 全选/全不选/自定义模型录入、复制端点；default_model 自动取首个已启用供后台流程；reasoning_effort 7 档；EndpointEditDialog._on_accept base_url 校验 http/https scheme + rstrip("/")；ModelFetchWorker 增加 stop() best-effort 标志位 + finished→deleteLater 自清理 + closeEvent/_on_fetch_models 停止前一个 worker wait(2000) + 防御式 isRunning 访问避免 wrapper 失效 RuntimeError；ModelFetchWorker 构造接收 proxy 参数，_on_fetch_models 从 config_manager.get_network_settings 读取代理传入；「网络代理」QGroupBox 分组（QCheckBox 启用开关 + QLineEdit 代理 URL）；「续写默认配置」含 prefer_non_stream 优先非流式 QCheckBox + user_input_history_size 输入历史条数 QSpinBox(1–30)；_on_accept 持久化 continuation/network；不含上下文提取配置——已统一由流程端点配置+预览面板管理）
+│   ├── settings_dialog.py       # 设置对话框（API 端点管理含 models 全部列表 + enabled_models 可勾选多选 QListWidget + 全选/全不选/自定义模型录入、复制端点；default_model 自动取首个已启用供后台流程；reasoning_effort 7 档（思考强度唯一配置入口，预设不再覆盖）；EndpointEditDialog._on_accept base_url 校验 http/https scheme + rstrip("/")；ModelFetchWorker 增加 stop() best-effort 标志位 + finished→deleteLater 自清理 + closeEvent/_on_fetch_models 停止前一个 worker wait(2000) + 防御式 isRunning 访问避免 wrapper 失效 RuntimeError；ModelFetchWorker 构造接收 proxy 参数，_on_fetch_models 从 config_manager.get_network_settings 读取代理传入；「网络代理」QGroupBox 分组（QCheckBox 启用开关 + QLineEdit 代理 URL）；「续写默认配置」含 prefer_non_stream 优先非流式 QCheckBox + user_input_history_size 输入历史条数 QSpinBox(1–30)；_on_accept 持久化 continuation/network；不含上下文提取配置——已统一由流程端点配置+预览面板管理）
 │   ├── flow_endpoint_dialog.py  # 流程端点配置（13 流程端点映射 + 每流程模型下拉 enabled_models 回退链 + 11 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口；两段可勾选折叠，折叠 setFixedHeight(标题栏)+_fit_dialog_height 按 totalSizeHint 锁对话框高度收紧，宽度不锁可拖，端点默认展开、破限默认折叠）
 │   ├── jailbreak_custom_dialog.py # 自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
 │   ├── checkable_combo.py       # 可勾选多选下拉（世界书用；关闭态摘要文本 + 主题 QSS 箭头）

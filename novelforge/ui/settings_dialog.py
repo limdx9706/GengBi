@@ -250,10 +250,11 @@ class EndpointEditDialog(QDialog):
         for label, value in REASONING_EFFORT_OPTIONS:
             self._reasoning_effort_combo.addItem(label, value)
         self._reasoning_effort_combo.setToolTip(
-            "思考强度（reasoning_effort），覆盖 OpenAI o 系列"
-            "（minimal/low/medium/high）、DeepSeek V4（max）等 OpenAI 兼容网关；\n"
+            "思考强度（reasoning_effort），仅由端点控制，预设不再覆盖。\n"
+            "覆盖 OpenAI o 系列（minimal/low/medium/high）、DeepSeek V4（max）"
+            "等 OpenAI 兼容网关；\n"
             "「不发送」表示不写入该字段，由模型默认行为决定。\n"
-            "不支持该字段的网关会忽略它，无副作用。"
+            "Qwen3.8-flash 等模型会在发送前自动转换为 thinking_budget。"
         )
         form.addRow("思考强度:", self._reasoning_effort_combo)
 

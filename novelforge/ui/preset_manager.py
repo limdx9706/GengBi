@@ -274,10 +274,6 @@ class PresetManager(PersistentDialog):
         self._top_k_spin.setValue(0)
         params_form.addRow("Top K:", self._top_k_spin)
 
-        self._reasoning_effort_combo = QComboBox()
-        self._reasoning_effort_combo.addItems(["auto", "low", "medium", "high", "max"])
-        params_form.addRow("推理强度:", self._reasoning_effort_combo)
-
         self._save_params_btn = QPushButton("保存参数")
         params_form.addRow("", self._save_params_btn)
 
@@ -425,10 +421,6 @@ class PresetManager(PersistentDialog):
         if isinstance(top_p, (int, float)):
             self._top_p_spin.setValue(int(top_p * 100))
         self._top_k_spin.setValue(params.get("top_k", 0))
-        reasoning = params.get("reasoning_effort", "high")
-        if reasoning not in ("auto", "low", "medium", "high", "max"):
-            reasoning = "high"
-        self._reasoning_effort_combo.setCurrentText(reasoning)
 
     # ===== 预设操作 =====
 
@@ -783,9 +775,6 @@ class PresetManager(PersistentDialog):
         )
         self._current_preset.generation_params["top_k"] = (
             self._top_k_spin.value()
-        )
-        self._current_preset.generation_params["reasoning_effort"] = (
-            self._reasoning_effort_combo.currentText()
         )
 
         self.preset_service.save_preset(self._current_preset)
