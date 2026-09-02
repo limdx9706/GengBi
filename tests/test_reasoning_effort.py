@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from novelforge.models.preset import WritingPreset
-from novelforge.services.llm_client import LLMClient, QWEN_THINKING_BUDGET_MAX
+from novelforge.services.llm_client import LLMClient, QWEN_THINKING_BUDGET_MAX, coerce_merge_system_messages
 
 
 def _apply_extensions(
@@ -419,10 +419,12 @@ def test_qwen38_flash_empty_effort_uses_model_default() -> None:
 
 
 def test_qwen38_flash_none_disables_thinking() -> None:
-    """qwen3.8-flash + none → enable_thinking=False。"""
+    """qwen3.8-flash + none → enable_thinking=False + chat_template_kwargs。"""
     payload = _apply_extensions("qwen3.8-flash", reasoning_effort="none")
     assert payload.get("enable_thinking") is False
+    assert payload.get("chat_template_kwargs", {}).get("enable_thinking") is False
     assert "thinking_budget" not in payload
+    assert "reasoning_effort" not in payload
 
 
 def test_qwen_extra_payload_budget_zero_removed() -> None:
@@ -453,10 +455,10 @@ def test_qwen_extra_payload_budget_clamped() -> None:
     assert payload["thinking_budget"] == QWEN_THINKING_BUDGET_MAX
 
 
-def test_qwen38_max_high_keeps_reasoning_effort() -> None:
-    """qwen3.8-max + high 仍发 reasoning_effort。"""
+def test_qwen38_max_high_maps_to_xhigh() -> None:
+    """qwen3.8-max + high → reasoning_effort=xhigh（Qwen3.8 模板档位）。"""
     payload = _apply_extensions("qwen3.8-max", reasoning_effort="high")
-    assert payload.get("reasoning_effort") == "high"
+    assert payload.get("reasoning_effort") == "xhigh"
     assert "thinking_budget" not in payload
 
 
@@ -475,3 +477,193 @@ def test_non_qwen_high_unchanged() -> None:
     """非 Qwen 模型 high 仍发 reasoning_effort。"""
     payload = _apply_extensions("gpt-4o", reasoning_effort="high")
     assert payload.get("reasoning_effort") == "high"
+
+
+# ===== Qwen3.8 模型检测 =====
+
+
+def test_is_qwen38_model_hits() -> None:
+    """Qwen3.8 族模型名检测。"""
+    assert LLMClient._is_qwen38_model("Qwen/Qwen3.8-27B") is True
+    assert LLMClient._is_qwen38_model("qwen3.8-flash") is True
+    assert LLMClient._is_qwen38_model("qwen-3.8-27b") is True
+
+
+def test_is_qwen38_model_misses() -> None:
+    """非 Qwen3.8 模型不应命中。"""
+    assert LLMClient._is_qwen38_model("gpt-4o") is False
+    assert LLMClient._is_qwen38_model("Qwen3-8B") is False
+    assert LLMClient._is_qwen38_model("qwen3.5-27b") is False
+    assert LLMClient._is_qwen38_model("") is False
+
+
+# ===== Qwen3.8 system 消息合并 =====
+
+
+def test_merge_system_messages_multiple_at_start() -> None:
+    """多条连续 system 合并为一条置于首位。"""
+    messages = [
+        {"role": "system", "content": "A"},
+        {"role": "system", "content": "B"},
+        {"role": "user", "content": "hi"},
+    ]
+    result = LLMClient._merge_system_messages(messages)
+    assert len(result) == 2
+    assert result[0]["role"] == "system"
+    assert result[0]["content"] == "A\n\nB"
+    assert result[1]["role"] == "user"
+
+
+def test_merge_system_messages_system_after_history() -> None:
+    """历史中间的 system 抽到开头合并。"""
+    messages = [
+        {"role": "system", "content": "main"},
+        {"role": "user", "content": "ch1"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "system", "content": "after"},
+        {"role": "user", "content": "task"},
+    ]
+    result = LLMClient._merge_system_messages(messages)
+    assert result[0]["role"] == "system"
+    assert result[0]["content"] == "main\n\nafter"
+    assert [m["role"] for m in result[1:]] == ["user", "assistant", "user"]
+
+
+def test_merge_system_messages_single_at_zero_unchanged() -> None:
+    """仅一条 system 且在 index 0 时不改。"""
+    messages = [
+        {"role": "system", "content": "only"},
+        {"role": "user", "content": "hi"},
+    ]
+    result = LLMClient._merge_system_messages(messages)
+    assert result == messages
+
+
+def test_prepare_messages_non_qwen38_no_merge() -> None:
+    """默认不合并：非 Qwen3.8 保持多条 system。"""
+    messages = [
+        {"role": "system", "content": "A"},
+        {"role": "system", "content": "B"},
+        {"role": "user", "content": "hi"},
+    ]
+    client = LLMClient("https://api.example.com/v1", "sk-test")
+    result = client._prepare_messages_for_model(messages, "gpt-4o")
+    assert result == messages
+
+
+def test_prepare_messages_qwen38_default_no_merge() -> None:
+    """默认不合并：Qwen3.8 也不自动合并。"""
+    messages = [
+        {"role": "system", "content": "A"},
+        {"role": "system", "content": "B"},
+        {"role": "user", "content": "hi"},
+    ]
+    client = LLMClient("https://api.example.com/v1", "sk-test")
+    result = client._prepare_messages_for_model(messages, "qwen3.8-27b")
+    assert result == messages
+
+
+def test_prepare_messages_all_system_qwen38() -> None:
+    """全 system：ensure 后末条改 user，默认不合并。"""
+    messages = [
+        {"role": "system", "content": "破限"},
+        {"role": "system", "content": "任务"},
+    ]
+    client = LLMClient("https://api.example.com/v1", "sk-test")
+    result = client._prepare_messages_for_model(messages, "Qwen/Qwen3.8-27B")
+    assert len(result) == 2
+    assert result[0]["role"] == "system"
+    assert result[0]["content"] == "破限"
+    assert result[-1]["role"] == "user"
+    assert result[-1]["content"] == "任务"
+
+
+def test_prepare_messages_merge_enabled() -> None:
+    """merge=True：任意模型都合并。"""
+    messages = [
+        {"role": "system", "content": "A"},
+        {"role": "system", "content": "B"},
+        {"role": "user", "content": "hi"},
+    ]
+    client = LLMClient(
+        "https://api.example.com/v1", "sk-test", merge_system_messages=True
+    )
+    result = client._prepare_messages_for_model(messages, "gpt-4o")
+    assert len(result) == 2
+    assert result[0]["content"] == "A\n\nB"
+
+
+def test_prepare_messages_legacy_always_string() -> None:
+    """旧配置 always 字符串视为合并。"""
+    messages = [
+        {"role": "system", "content": "A"},
+        {"role": "system", "content": "B"},
+        {"role": "user", "content": "hi"},
+    ]
+    client = LLMClient(
+        "https://api.example.com/v1", "sk-test", merge_system_messages="always"
+    )
+    result = client._prepare_messages_for_model(messages, "qwen3.8-27b")
+    assert result[0]["content"] == "A\n\nB"
+
+
+def test_prepare_messages_legacy_auto_is_off() -> None:
+    """旧配置 auto 视为不合并。"""
+    messages = [
+        {"role": "system", "content": "A"},
+        {"role": "system", "content": "B"},
+        {"role": "user", "content": "hi"},
+    ]
+    client = LLMClient(
+        "https://api.example.com/v1", "sk-test", merge_system_messages="auto"
+    )
+    result = client._prepare_messages_for_model(messages, "qwen3.8-27b")
+    assert result == messages
+
+
+def test_coerce_merge_system_messages() -> None:
+    """coerce：always/True 为开，其余为关。"""
+    assert coerce_merge_system_messages(True) is True
+    assert coerce_merge_system_messages("always") is True
+    assert coerce_merge_system_messages(False) is False
+    assert coerce_merge_system_messages("never") is False
+    assert coerce_merge_system_messages("auto") is False
+    assert coerce_merge_system_messages("") is False
+    assert coerce_merge_system_messages(None) is False
+    assert coerce_merge_system_messages("bogus") is False
+    client = LLMClient(
+        "https://api.example.com/v1", "sk-test", merge_system_messages="bogus"
+    )
+    assert client.merge_system_messages is False
+
+
+def test_qwen38_27b_none_disables_with_template_kwargs() -> None:
+    """qwen3.8-27b + none → enable_thinking + chat_template_kwargs。"""
+    payload = _apply_extensions("qwen3.8-27b", reasoning_effort="none")
+    assert payload.get("enable_thinking") is False
+    assert payload.get("chat_template_kwargs", {}).get("enable_thinking") is False
+    assert "reasoning_effort" not in payload
+    assert "thinking_budget" not in payload
+
+
+def test_qwen38_27b_high_maps_to_xhigh() -> None:
+    """qwen3.8-27b + high → reasoning_effort=xhigh，无 thinking_budget。"""
+    payload = _apply_extensions("qwen3.8-27b", reasoning_effort="high")
+    assert payload.get("reasoning_effort") == "xhigh"
+    assert "thinking_budget" not in payload
+
+
+def test_qwen38_max_none_disables_thinking() -> None:
+    """qwen3.8-max + none → 关闭思考。"""
+    payload = _apply_extensions("qwen3.8-max", reasoning_effort="none")
+    assert payload.get("enable_thinking") is False
+    assert payload.get("chat_template_kwargs", {}).get("enable_thinking") is False
+
+
+def test_qwen38_27b_auto_does_not_send_effort() -> None:
+    """qwen3.8-27b + auto 不发 reasoning_effort（禁止映射成 xhigh）。"""
+    payload = _apply_extensions("qwen3.8-27b", reasoning_effort="auto")
+    assert "reasoning_effort" not in payload
+    assert "thinking_budget" not in payload
+    assert LLMClient._map_qwen38_reasoning_effort("auto") is None
+    assert LLMClient._map_qwen38_reasoning_effort("high") == "xhigh"

@@ -50,6 +50,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from novelforge.core.post_processor import (
+    compose_thinking_display,
+    extract_thinking_content,
+)
 from novelforge.models import Continuation, VolumeRunConfig
 from novelforge.ui.context_preview_panel import ContextPreviewPanel
 from novelforge.ui.flow_layout import FlowContainer
@@ -134,6 +138,8 @@ class ContinuationPanel(QWidget):
     endpoint_changed = Signal(str)
     # 用户手动切换模型（参数：端点 ID, 模型名），供 MainWindow 持久化面板选择
     model_user_changed = Signal(str, str)
+    # 输出栏偏好变化（show_thinking / apply_regex），供 MainWindow 持久化
+    output_prefs_changed = Signal(bool, bool)
 
     def __init__(self, parent=None) -> None:
         """初始化续写控制面板。"""
@@ -142,6 +148,14 @@ class ContinuationPanel(QWidget):
         self._current_swipe: Continuation | None = None
         self._all_swipes: list[Continuation] = []
         self._chunk_buffer: list[str] = []  # 待刷新的 chunk 缓冲
+        self._stream_raw_text: str = ""  # 流式期间累积的 LLM 原文
+        self._stream_reasoning_text: str = ""  # 流式期间累积的 API 推理
+        self._thinking_dirty: bool = False  # 思维链区待节流刷新
+        # 后处理上下文（由 MainWindow 注入，供输出栏正则开关刷新显示）
+        self._regex_engine: Any | None = None
+        self._template_engine: Any | None = None
+        self._post_project_id: str = ""
+        self._post_chapter_metadata: dict[str, Any] | None = None
         # 端点→上次手动选择的模型（会话记忆，不持久化；切换端点时恢复）
         self._last_model_per_endpoint: dict[str, str] = {}
 
@@ -331,6 +345,13 @@ class ContinuationPanel(QWidget):
         self._context_preview_panel.setMinimumHeight(80)
 
         # ===== 续写输出区（不在本面板布局中，由 MainWindow 放入独立分栏） =====
+        self._thinking_edit = QPlainTextEdit()
+        self._thinking_edit.setReadOnly(True)
+        self._thinking_edit.setPlaceholderText("思维链内容将显示在此处...")
+        self._thinking_edit.setVisible(False)
+        self._thinking_edit.setMinimumHeight(80)
+        self._thinking_edit.setMaximumHeight(240)
+
         self._output_edit = QPlainTextEdit()
         self._output_edit.setReadOnly(True)
         self._output_edit.setPlaceholderText("续写输出将显示在此处...")
@@ -338,8 +359,25 @@ class ContinuationPanel(QWidget):
         self._output_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._output_edit.customContextMenuRequested.connect(self._on_output_context_menu)
         self._current_highlights: list[dict] = []  # 当前 swipe 的高亮列表
+
+        self._output_options_host = FlowContainer()
+        output_opts = self._output_options_host.flow_layout
+        output_opts.setSpacing(8)
+        self._show_thinking_check = QCheckBox("查看思维链")
+        self._show_thinking_check.setChecked(False)
+        self._show_thinking_check.setToolTip(
+            "开启后在输出框上方显示当前段的 API 推理与 <novelforge_thinking> 思维链"
+        )
+        self._apply_regex_check = QCheckBox("使用正则")
+        self._apply_regex_check.setChecked(True)
+        self._apply_regex_check.setToolTip(
+            "关闭后输出栏显示后处理前原文；新生成时也不套用 AI_OUTPUT 正则"
+        )
         self._auto_scroll_check = QCheckBox("自动滚动跟随")
         self._auto_scroll_check.setChecked(True)
+        output_opts.addWidget(self._show_thinking_check)
+        output_opts.addWidget(self._apply_regex_check)
+        output_opts.addWidget(self._auto_scroll_check)
 
         # ===== 按钮区（流式布局，窄屏自动换行） =====
         self._btn_host = FlowContainer()
@@ -434,6 +472,9 @@ class ContinuationPanel(QWidget):
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         # 世界书多选变化向外转发
         self._worldbook_panel.worldbook_changed.connect(self.worldbook_changed.emit)
+        # 输出栏开关
+        self._show_thinking_check.toggled.connect(self._on_show_thinking_toggled)
+        self._apply_regex_check.toggled.connect(self._on_apply_regex_toggled)
 
     # ===== 端点/模型管理 =====
 
@@ -682,6 +723,7 @@ class ContinuationPanel(QWidget):
             "inject_lookback_context": self._inject_lookback_context_check.isChecked(),
             "inject_lookback_protagonist": self._inject_lookback_protagonist_check.isChecked(),
             "inject_lookback_custom_characters": self._inject_lookback_custom_characters_check.isChecked(),
+            "apply_regex": self._apply_regex_check.isChecked(),
             "preset_id": self.get_selected_preset_id(),
             "top_p": 1.0,
             "frequency_penalty": 0.0,
@@ -708,6 +750,118 @@ class ContinuationPanel(QWidget):
             self._inject_lookback_custom_characters_check.setChecked(
                 bool(params["inject_lookback_custom_characters"])
             )
+        if "apply_regex" in params:
+            self._apply_regex_check.setChecked(bool(params["apply_regex"]))
+        if "show_thinking" in params:
+            self._show_thinking_check.setChecked(bool(params["show_thinking"]))
+
+    def set_output_process_context(
+        self,
+        regex_engine: Any | None,
+        template_engine: Any | None,
+        project_id: str = "",
+        chapter_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """注入后处理上下文，供输出栏「使用正则」开关刷新显示。"""
+        self._regex_engine = regex_engine
+        self._template_engine = template_engine
+        self._post_project_id = project_id
+        self._post_chapter_metadata = chapter_metadata
+
+    def set_output_prefs(self, show_thinking: bool, apply_regex: bool) -> None:
+        """从 config 恢复输出栏开关（blockSignals 避免重复持久化）。"""
+        self._show_thinking_check.blockSignals(True)
+        self._apply_regex_check.blockSignals(True)
+        self._show_thinking_check.setChecked(show_thinking)
+        self._apply_regex_check.setChecked(apply_regex)
+        self._show_thinking_check.blockSignals(False)
+        self._apply_regex_check.blockSignals(False)
+        self._thinking_edit.setVisible(show_thinking)
+        if self._current_swipe or self._is_streaming:
+            self._refresh_thinking_display()
+            if self._current_swipe and not self._is_streaming:
+                self._refresh_output_display()
+
+    def _on_show_thinking_toggled(self, checked: bool) -> None:
+        """查看思维链开关。"""
+        self._thinking_edit.setVisible(checked)
+        self._refresh_thinking_display()
+        self.output_prefs_changed.emit(checked, self._apply_regex_check.isChecked())
+
+    def _on_apply_regex_toggled(self, checked: bool) -> None:
+        """使用正则开关：刷新已完成 swipe 的显示，并通知持久化。"""
+        if self._current_swipe and not self._is_streaming:
+            self._refresh_output_display()
+        self.output_prefs_changed.emit(self._show_thinking_check.isChecked(), checked)
+
+    def _body_text_for_raw(
+        self,
+        raw: str,
+        processed: str = "",
+        *,
+        has_raw: bool = False,
+    ) -> str:
+        """按「使用正则」开关计算正文展示文本。
+
+        无 ``raw_content`` 的旧 swipe：始终显示已入库 ``content``，禁止二次后处理。
+        有原文且开启正则：显示已入库 ``content``（避免接收后模板 setvar 再执行）。
+        有原文且关闭正则：显示原文。
+        """
+        if not has_raw:
+            return processed or raw
+        if self._apply_regex_check.isChecked():
+            return processed or raw
+        return raw or processed
+
+    def _format_output_with_title(self, body: str, generated_title: str = "") -> str:
+        """在正文前附加生成标题行（与 set_current_swipe 展示一致）。"""
+        if generated_title:
+            return f"【生成标题】{generated_title}\n\n{body}"
+        return body
+
+    def _refresh_output_display(self) -> None:
+        """按当前 swipe 与正则开关刷新输出区。"""
+        swipe = self._current_swipe
+        if not swipe:
+            return
+        has_raw = bool(swipe.raw_content)
+        raw = swipe.raw_content or swipe.content
+        body = self._body_text_for_raw(raw, swipe.content, has_raw=has_raw)
+        title = getattr(swipe, "generated_title", "") or ""
+        display_text = self._format_output_with_title(body, title)
+        self._output_edit.setPlainText(display_text)
+        # 显示文本与持久化 content 不一致时跳过高亮（偏移会错位）
+        stored = swipe.content
+        if title:
+            stored = f"【生成标题】{title}\n\n{stored}"
+        if display_text == stored:
+            self.apply_highlights()
+        else:
+            self._output_edit.setExtraSelections([])
+
+    def _refresh_thinking_display(self) -> None:
+        """刷新思维链区（当前 swipe 或流式缓冲）。"""
+        if not self._show_thinking_check.isChecked():
+            return
+        swipe = self._current_swipe
+        api_reasoning = (
+            self._stream_reasoning_text
+            if self._is_streaming
+            else (swipe.reasoning_content if swipe else "")
+        )
+        raw_source = (
+            self._stream_raw_text
+            if self._is_streaming
+            else ((swipe.raw_content or swipe.content) if swipe else "")
+        )
+        xml_thinking = extract_thinking_content(raw_source or "")
+        self._thinking_edit.setPlainText(
+            compose_thinking_display(
+                api_reasoning,
+                xml_thinking,
+                raw_text=raw_source or "",
+            )
+        )
 
     # ===== 流式输出控制 =====
 
@@ -715,7 +869,13 @@ class ContinuationPanel(QWidget):
         """开始流式输出模式。"""
         self._is_streaming = True
         self._chunk_buffer.clear()
+        self._stream_raw_text = ""
+        self._stream_reasoning_text = ""
+        self._thinking_dirty = False
         self._output_edit.clear()
+        if self._show_thinking_check.isChecked():
+            self._thinking_edit.clear()
+            self._refresh_thinking_display()
 
         # 启动节流定时器
         self._flush_timer.start()
@@ -735,7 +895,11 @@ class ContinuationPanel(QWidget):
         self._remove_cursor()
         self._update_button_states()
 
-    def restore_streaming_state(self, buffered_text: str) -> None:
+    def restore_streaming_state(
+        self,
+        buffered_text: str,
+        reasoning_text: str = "",
+    ) -> None:
         """恢复续写流式状态（切回发起章节时调用）。
 
         重建流式输出模式（_is_streaming=True + 节流/光标定时器 + 按钮态），
@@ -743,46 +907,62 @@ class ContinuationPanel(QWidget):
 
         Args:
             buffered_text: 已缓冲的续写输出文本
+            reasoning_text: 已缓冲的 API 推理文本
         """
         # 复用 start_streaming 完成状态/定时器/按钮态初始化（会清空输出）
         self.start_streaming()
+        self._stream_reasoning_text = reasoning_text
         # 回填已缓冲的文本
         if buffered_text:
+            self._stream_raw_text = buffered_text
             cursor = self._output_edit.textCursor()
             cursor.movePosition(cursor.MoveOperation.End)
             cursor.insertText(buffered_text)
             if self._auto_scroll_check.isChecked():
                 self._output_edit.ensureCursorVisible()
+        if self._show_thinking_check.isChecked():
+            self._refresh_thinking_display()
 
     def append_chunk(self, text: str) -> None:
         """追加正文 chunk 到缓冲区（节流刷新）。"""
         self._chunk_buffer.append(text)
+        self._stream_raw_text += text
+        self._thinking_dirty = True
 
     def append_reasoning(self, text: str) -> None:
-        """推理内容框已移除，此方法保留为 no-op 以兼容外部信号连接。"""
-        pass
+        """追加 API 推理 chunk（思维链区随正文 50ms 节流刷新）。"""
+        if not text:
+            return
+        self._stream_reasoning_text += text
+        self._thinking_dirty = True
 
     def _flush_buffer(self) -> None:
         """刷新缓冲区到输出区（节流批量更新）。"""
-        if not self._chunk_buffer:
-            return
-        text = "".join(self._chunk_buffer)
-        self._chunk_buffer.clear()
+        if self._chunk_buffer:
+            text = "".join(self._chunk_buffer)
+            self._chunk_buffer.clear()
 
-        # 移除旧光标
-        self._remove_cursor()
-        # 追加新文本
-        cursor = self._output_edit.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(text)
+            # 移除旧光标
+            self._remove_cursor()
+            # 追加新文本
+            cursor = self._output_edit.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            cursor.insertText(text)
 
-        # 添加光标
-        if self._is_streaming:
-            cursor.insertText("█")
+            # 添加光标
+            if self._is_streaming:
+                cursor.insertText("█")
 
-        # 自动滚动
-        if self._auto_scroll_check.isChecked():
-            self._output_edit.ensureCursorVisible()
+            # 自动滚动
+            if self._auto_scroll_check.isChecked():
+                self._output_edit.ensureCursorVisible()
+
+        if self._thinking_dirty:
+            self._thinking_dirty = False
+            if self._show_thinking_check.isChecked():
+                self._refresh_thinking_display()
+                if self._is_streaming and self._auto_scroll_check.isChecked():
+                    self._thinking_edit.ensureCursorVisible()
 
     def _toggle_cursor(self) -> None:
         """切换光标显示（闪烁动画）。"""
@@ -901,15 +1081,9 @@ class ContinuationPanel(QWidget):
         self._flush_timer.stop()
 
         if swipe:
-            # 显示 swipe 内容（若有生成的标题，在内容前显示）
-            display_text = swipe.content
-            generated_title = getattr(swipe, "generated_title", "") or ""
-            if generated_title:
-                display_text = f"【生成标题】{generated_title}\n\n{swipe.content}"
-            self._output_edit.setPlainText(display_text)
-            # 加载该 swipe 已持久化的高亮
             self._current_highlights = list(getattr(swipe, "highlights", []) or [])
-            self.apply_highlights()
+            self._refresh_output_display()
+            self._refresh_thinking_display()
             # 显示元数据
             self._set_swipe_info(
                 f"模型: {swipe.model} | "
@@ -921,6 +1095,8 @@ class ContinuationPanel(QWidget):
             )
         else:
             self._output_edit.clear()
+            if self._show_thinking_check.isChecked():
+                self._thinking_edit.setPlainText("当前段无思维链内容")
             self._current_highlights = []
             self.apply_highlights()
             self._set_swipe_info("无续写版本", "metaText")
@@ -1036,6 +1212,10 @@ class ContinuationPanel(QWidget):
     def clear_output(self) -> None:
         """清空输出区。"""
         self._output_edit.clear()
+        self._thinking_edit.clear()
+        self._stream_raw_text = ""
+        self._stream_reasoning_text = ""
+        self._thinking_dirty = False
         self._current_swipe = None
         self._all_swipes = []
         self._current_highlights = []
@@ -1078,6 +1258,16 @@ class ContinuationPanel(QWidget):
     def output_edit(self) -> QPlainTextEdit:
         """续写输出编辑器控件（由 MainWindow 放入独立分栏）。"""
         return self._output_edit
+
+    @property
+    def thinking_edit(self) -> QPlainTextEdit:
+        """思维链只读展示区（由 MainWindow 放入输出分栏）。"""
+        return self._thinking_edit
+
+    @property
+    def output_options_host(self) -> FlowContainer:
+        """输出栏底部开关容器（查看思维链 / 使用正则 / 自动滚动）。"""
+        return self._output_options_host
 
     @property
     def auto_scroll_check(self) -> QCheckBox:

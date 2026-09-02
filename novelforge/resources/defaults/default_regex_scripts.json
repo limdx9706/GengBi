@@ -1,8 +1,24 @@
 [
-  {
+    {
     "id": "nf_regex_hide_thinking",
     "scriptName": "GB-思维链隐藏",
     "findRegex": "/<novelforge_thinking>[\\s\\S]*?<\\/novelforge_thinking>\\n*/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [2],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "substituteRegex": false,
+    "minDepth": 0,
+    "maxDepth": 0,
+    "markupSafety": false
+  },
+  {
+    "id": "nf_regex_hide_native_think",
+    "scriptName": "GB-原生思维链隐藏",
+    "findRegex": "/<think>[\\s\\S]*?<\\/think>\\n*/gi",
     "replaceString": "",
     "trimStrings": [],
     "placement": [2],

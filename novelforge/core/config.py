@@ -113,6 +113,8 @@ def get_default_config() -> dict[str, Any]:
             "inject_lookback_context": False,
             "inject_lookback_protagonist": False,
             "inject_lookback_custom_characters": False,
+            "show_thinking": False,
+            "apply_regex": True,
             # 全局优先非流式（默认关=流式；兼容部分网关；超时与流式对齐无 total 上限）
             "prefer_non_stream": False,
             # 用户输入历史（最近在前，默认保留 5 条）
@@ -336,6 +338,7 @@ class ConfigManager:
             endpoint.setdefault("models", [])
             endpoint.setdefault("enabled_models", [])
             endpoint.setdefault("reasoning_effort", "")
+            endpoint.setdefault("merge_system_messages", False)
             endpoint.setdefault("extra_payload", {})
             endpoint.setdefault("extra_headers", {})
 

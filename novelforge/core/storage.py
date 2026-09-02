@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS continuations (
     extracted_context_snapshot TEXT DEFAULT '[]',
     prompt_snapshot TEXT DEFAULT '[]',
     reasoning_content TEXT,
+    raw_content TEXT DEFAULT '',
     generated_title TEXT DEFAULT '',
     agent_artifacts TEXT,
     volume_artifacts TEXT,
@@ -415,6 +416,11 @@ class Storage:
                 "ALTER TABLE continuations ADD COLUMN generated_title TEXT DEFAULT ''"
             )
             logger.info("已为 continuations 表添加 generated_title 列")
+        if "raw_content" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE continuations ADD COLUMN raw_content TEXT DEFAULT ''"
+            )
+            logger.info("已为 continuations 表添加 raw_content 列")
         if "parent_id" not in column_names:
             await self._conn.execute(
                 "ALTER TABLE continuations ADD COLUMN parent_id TEXT"
@@ -837,7 +843,7 @@ class Storage:
             "parent_id, status, created_by, parameters_snapshot, preset_id, "
             "preset_snapshot, regex_script_ids_snapshot, "
             "extracted_context_snapshot, prompt_snapshot, reasoning_content, "
-            "generated_title, agent_artifacts, volume_artifacts, highlights "
+            "raw_content, generated_title, agent_artifacts, volume_artifacts, highlights "
             f"FROM continuations WHERE chapter_id IN ({placeholders}) "
             "ORDER BY created_at ASC",
             tuple(chapter_ids),
@@ -1028,8 +1034,8 @@ class Storage:
                 parent_id, status, created_by, parameters_snapshot, preset_id,
                 preset_snapshot, regex_script_ids_snapshot,
                 extracted_context_snapshot, prompt_snapshot, reasoning_content,
-                generated_title, agent_artifacts, volume_artifacts, highlights)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                raw_content, generated_title, agent_artifacts, volume_artifacts, highlights)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 continuation["id"],
                 continuation["chapter_id"],
@@ -1051,6 +1057,7 @@ class Storage:
                 ),
                 json.dumps(continuation.get("prompt_snapshot", []), ensure_ascii=False),
                 continuation.get("reasoning_content"),
+                continuation.get("raw_content", ""),
                 continuation.get("generated_title", ""),
                 json.dumps(continuation.get("agent_artifacts"), ensure_ascii=False)
                 if continuation.get("agent_artifacts")
@@ -1072,7 +1079,7 @@ class Storage:
             "parent_id, status, created_by, parameters_snapshot, preset_id, "
             "preset_snapshot, regex_script_ids_snapshot, "
             "extracted_context_snapshot, prompt_snapshot, reasoning_content, "
-            "generated_title, agent_artifacts, volume_artifacts, highlights "
+            "raw_content, generated_title, agent_artifacts, volume_artifacts, highlights "
             "FROM continuations WHERE chapter_id = ? ORDER BY created_at ASC",
             (chapter_id,),
         ) as cursor:
@@ -1106,6 +1113,7 @@ class Storage:
             "extracted_context_snapshot": json.loads(row["extracted_context_snapshot"]) if row["extracted_context_snapshot"] else [],
             "prompt_snapshot": json.loads(row["prompt_snapshot"]) if row["prompt_snapshot"] else [],
             "reasoning_content": row["reasoning_content"],
+            "raw_content": row["raw_content"] if row["raw_content"] is not None else "",
             "generated_title": row["generated_title"],
             "agent_artifacts": json.loads(row["agent_artifacts"]) if row["agent_artifacts"] else None,
             "volume_artifacts": json.loads(row["volume_artifacts"]) if row["volume_artifacts"] else None,

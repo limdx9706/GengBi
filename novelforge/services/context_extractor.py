@@ -2816,6 +2816,7 @@ class ContextExtractor:
         reasoning_effort = ep.get("reasoning_effort", "") or ""
         extra_payload = ep.get("extra_payload") or {}
         extra_headers = ep.get("extra_headers") or {}
+        merge_system_messages = ep.get("merge_system_messages", False)
         network = self.config_manager.get_network_settings()
         proxy = (
             network["http_proxy"]
@@ -2829,6 +2830,7 @@ class ContextExtractor:
             reasoning_effort=reasoning_effort,
             extra_payload=extra_payload,
             extra_headers=extra_headers,
+            merge_system_messages=merge_system_messages,
             proxy=proxy,
         )
         model = self.config_manager.get_flow_model(flow_key) or DEFAULT_EXTRACTOR_MODEL

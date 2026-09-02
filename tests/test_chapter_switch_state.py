@@ -46,11 +46,13 @@ def _make_window():
     win._ontology_stream_text = ""
     win._continuation_chapter_id = None
     win._continuation_stream_text_by_chapter = {}
+    win._continuation_reasoning_by_chapter = {}
     win._audit_chapter_id = None
     win._volume_chapter_id = None
 
     # 其它被测方法访问的属性
     win._current_chapter = None
+    win._current_project_id = ""
     win._current_context_entries = []
     win._context_entries_by_chapter = {}
     win._extracting_chapter_id = None
@@ -76,6 +78,8 @@ def _make_window():
     win.history_service = MagicMock()
     win.flow_executor = MagicMock()
     win.flow_executor.is_active = False
+    win.regex_engine = None
+    win.template_engine = None
 
     # 内部辅助方法 stub
     win._set_status_message = MagicMock()
@@ -495,13 +499,31 @@ class TestChapterSelectedRestore:
 
         # 应调 restore_streaming_state
         win.continuation_panel.restore_streaming_state.assert_called_once_with(
-            "已接收的续写文本"
+            "已接收的续写文本",
+            reasoning_text="",
         )
         # 应锁定编辑器
         win.chapter_editor.set_streaming_locked.assert_called_once_with(True)
         # 不应调 set_current_swipe / clear_output
         win.continuation_panel.set_current_swipe.assert_not_called()
         win.continuation_panel.clear_output.assert_not_called()
+
+    def test_restore_streaming_state_includes_reasoning(self) -> None:
+        """切回发起章节时把 API 推理缓冲一并回填。"""
+        win = _make_window()
+        win._continuation_chapter_id = "c1"
+        win._continuation_stream_text_by_chapter["c1"] = "已接收的续写文本"
+        win._continuation_reasoning_by_chapter["c1"] = "推理缓冲"
+        chapter = _make_chapter("c1")
+        win.storage_service.load_chapter.return_value = chapter
+        win._current_chapter = None
+
+        win._on_chapter_selected("c1")
+
+        win.continuation_panel.restore_streaming_state.assert_called_once_with(
+            "已接收的续写文本",
+            reasoning_text="推理缓冲",
+        )
 
     def test_no_restore_when_switching_to_other_chapter(self) -> None:
         """切到非发起章节：走原 set_current_swipe / clear_output 分支。"""

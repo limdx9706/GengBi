@@ -1,10 +1,10 @@
 """RegexService 默认正则注入测试。
 
 覆盖 ensure_default_scripts_exist：
-1. 首次调用（global.json 不存在）→ 注入 4 条默认脚本
-2. global.json 为空数组 → 注入 4 条默认脚本
-3. global.json 已含脚本 → 不覆盖
-4. 注入后脚本可被 get_ordered_scripts 加载且含 GB-思维链隐藏
+1. 首次调用（global.json 不存在）→ 注入 6 条默认脚本
+2. global.json 为空数组 → 注入 6 条默认脚本
+3. global.json 已含脚本 → 不覆盖已有条目，按 id 补齐缺失内置脚本
+4. 注入后脚本可被 get_ordered_scripts 加载且含 GB-思维链隐藏 / GB-原生思维链隐藏
 """
 from __future__ import annotations
 
@@ -35,14 +35,15 @@ def _global_path(service: RegexService) -> Path:
 def test_ensure_default_scripts_injects_when_absent(
     regex_service: RegexService,
 ) -> None:
-    """global.json 不存在时，注入 5 条默认脚本。"""
+    """global.json 不存在时，注入 6 条默认脚本。"""
     assert not _global_path(regex_service).exists()
 
     scripts = regex_service.ensure_default_scripts_exist()
 
-    assert len(scripts) == 5
+    assert len(scripts) == 6
     names = {s.scriptName for s in scripts}
     assert "GB-思维链隐藏" in names
+    assert "GB-原生思维链隐藏" in names
     assert _global_path(regex_service).exists()
 
 
@@ -55,7 +56,7 @@ def test_ensure_default_scripts_injects_when_empty(
 
     scripts = regex_service.ensure_default_scripts_exist()
 
-    assert len(scripts) == 5
+    assert len(scripts) == 6
     thinking = next(
         s for s in scripts if s.scriptName == "GB-思维链隐藏"
     )
@@ -65,8 +66,7 @@ def test_ensure_default_scripts_injects_when_empty(
 def test_ensure_default_scripts_does_not_overwrite_existing(
     regex_service: RegexService,
 ) -> None:
-    """global.json 已含脚本时，不覆盖。"""
-    # 写入一条自定义脚本
+    """global.json 已含脚本时，不覆盖已有条目，按 id 补齐缺失内置脚本。"""
     from novelforge.models.regex import RegexScript
 
     custom = RegexScript(
@@ -80,9 +80,15 @@ def test_ensure_default_scripts_does_not_overwrite_existing(
 
     scripts = regex_service.ensure_default_scripts_exist()
 
-    # 应返回原有的 1 条，不注入默认
-    assert len(scripts) == 1
+    assert scripts[0].id == "custom_test"
     assert scripts[0].scriptName == "自定义测试"
+    names = {s.scriptName for s in scripts}
+    assert "GB-思维链隐藏" in names
+    assert "GB-原生思维链隐藏" in names
+    assert len(scripts) == 7
+
+    again = regex_service.ensure_default_scripts_exist()
+    assert len(again) == 7
 
 
 def test_injected_scripts_loadable_via_get_ordered(
@@ -100,4 +106,5 @@ def test_injected_scripts_loadable_via_get_ordered(
     scripts = [s for s, _ in ordered]
     names = {s.scriptName for s in scripts}
     assert "GB-思维链隐藏" in names
-    assert len(scripts) == 5
+    assert "GB-原生思维链隐藏" in names
+    assert len(scripts) == 6

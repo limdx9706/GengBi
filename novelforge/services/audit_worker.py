@@ -30,6 +30,7 @@ from novelforge.services.llm_client import (
     LLMClient,
     LLMError,
     RateLimitError,
+    coerce_merge_system_messages,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class AuditWorker(QThread):
         phase_name: str = "审计",
         extra_payload: dict | None = None,
         extra_headers: dict | None = None,
+        merge_system_messages: bool | str = False,
         proxy: str | None = None,
         prefer_non_stream: bool = False,
         parent=None,
@@ -95,6 +97,7 @@ class AuditWorker(QThread):
             phase_name: 阶段名（用于调试弹窗标题，如「单章审计」「重写需求分析」）
             extra_payload: 自定义请求体字段（deep merge 到 payload）
             extra_headers: 自定义 HTTP 头（update 到 headers）
+            merge_system_messages: 是否合并 system 消息（默认 False=不合并）
             proxy: HTTP/HTTPS 代理 URL（None 表示不走代理）
             prefer_non_stream: True 时走 chat_completion，完成后一次性推送全文
             parent: 父 QObject
@@ -110,6 +113,7 @@ class AuditWorker(QThread):
         # 自定义请求扩展（透传给 LLMClient）
         self.extra_payload: dict = extra_payload or {}
         self.extra_headers: dict = extra_headers or {}
+        self.merge_system_messages = coerce_merge_system_messages(merge_system_messages)
         # 网络代理（透传给 LLMClient）
         self.proxy = proxy
         # 全局非流式开关（默认 False=流式）
@@ -222,6 +226,11 @@ class AuditWorker(QThread):
                 reasoning_effort=self.reasoning_effort,
                 extra_payload=self._debug_override_endpoint.get("extra_payload") or {},
                 extra_headers=self._debug_override_endpoint.get("extra_headers") or {},
+                merge_system_messages=coerce_merge_system_messages(
+                    self._debug_override_endpoint.get(
+                        "merge_system_messages", self.merge_system_messages
+                    )
+                ),
                 proxy=self.proxy,
             )
             if ep_id:
@@ -314,6 +323,7 @@ class AuditWorker(QThread):
                 reasoning_effort=self.reasoning_effort,
                 extra_payload=self.extra_payload,
                 extra_headers=self.extra_headers,
+                merge_system_messages=self.merge_system_messages,
                 proxy=self.proxy,
             )
         client = self._effective_client()

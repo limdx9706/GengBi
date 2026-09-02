@@ -28,6 +28,17 @@ MIN_INTERRUPT_CHARS = 100
 # Qwen/DashScope thinking_budget 上限（qwen3.8-flash 为 256K）
 QWEN_THINKING_BUDGET_MAX = 262144
 
+def coerce_merge_system_messages(value: Any) -> bool:
+    """将端点「合并 system 消息」存储值规范为 bool，默认 False（不合并）。
+
+    兼容旧三档：``always`` → True；``auto`` / ``never`` / 空 / 其它 → False。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"always", "true", "1", "yes", "on", "merge"}
+    return False
+
 # reasoning_effort 档位 → thinking_budget 映射（None=不设 budget，走模型默认）
 _QWEN_EFFORT_BUDGET_MAP: dict[str, int | None] = {
     "none": None,
@@ -137,6 +148,7 @@ class LLMClient:
         extra_payload: dict | None = None,
         extra_headers: dict | None = None,
         proxy: str | None = None,
+        merge_system_messages: bool | str | None = None,
     ) -> None:
         """初始化 LLM 客户端。
 
@@ -152,6 +164,8 @@ class LLMClient:
             extra_headers: 自定义 HTTP 头（update 到 headers，可覆盖默认头）
             proxy: HTTP/HTTPS 代理 URL（如 ``http://127.0.0.1:7890`` 或
                 ``http://user:pass@host:port``），None/空串表示不使用代理
+            merge_system_messages: 是否合并多条 system 消息（默认 False=不合并；
+                兼容旧字符串 always/auto/never）
         """
         # 参数校验
         if not (base_url.startswith("http://") or base_url.startswith("https://")):
@@ -176,6 +190,8 @@ class LLMClient:
         self.extra_headers: dict = extra_headers or {}
         # HTTP/HTTPS 代理 URL（None 表示不走代理）
         self.proxy = proxy.strip() if proxy and proxy.strip() else None
+        # 合并 system：默认不合并，由端点选项显式开启
+        self.merge_system_messages = coerce_merge_system_messages(merge_system_messages)
         # 短请求（如 GET /models）：保留 total 总超时
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         # 生成请求（流式 + 非流式）：无 total 限制，sock_read 控制分块/空闲超时
@@ -306,10 +322,60 @@ class LLMClient:
         return "qwen" in key or key.startswith("qwq")
 
     @staticmethod
+    def _is_qwen38_model(model: str) -> bool:
+        """检测是否为 Qwen3.8 模型（原始模型名，避免 Qwen3-8B 误伤）。
+
+        使用小写原始名匹配 ``qwen3.8`` / ``qwen-3.8``，不用去分隔符归一化。
+        """
+        if not model:
+            return False
+        m = model.lower()
+        return "qwen3.8" in m or "qwen-3.8" in m
+
+    @staticmethod
+    def _is_qwen38_flash_model(model: str) -> bool:
+        """检测是否为 qwen3.8-flash 族。"""
+        return LLMClient._is_qwen38_model(model) and "flash" in model.lower()
+
+    @staticmethod
     def _is_qwen38_max_model(model: str) -> bool:
         """检测是否为 qwen3.8-max 族（支持 reasoning_effort 档位）。"""
         key = LLMClient._normalize_model_key(model)
         return "qwen38max" in key
+
+    @staticmethod
+    def _map_qwen38_reasoning_effort(effort: str) -> str | None:
+        """将端点档位映射为 Qwen3.8 模板支持的 xhigh/medium/low。"""
+        if not effort:
+            return None
+        e = effort.lower()
+        if e in {"auto"}:
+            return None
+        if e in {"xhigh", "high", "max"}:
+            return "xhigh"
+        if e == "medium":
+            return "medium"
+        if e in {"low", "minimal"}:
+            return "low"
+        return None
+
+    @staticmethod
+    def _set_qwen38_disable_thinking(payload: dict) -> None:
+        """关闭 Qwen3.8 思考：Qwen Cloud 顶层 + vLLM/SGLang chat_template_kwargs。"""
+        payload.pop("reasoning_effort", None)
+        payload.pop("thinking_budget", None)
+        payload["enable_thinking"] = False
+        extra_body = payload.get("extra_body")
+        if isinstance(extra_body, dict):
+            kwargs = extra_body.setdefault("chat_template_kwargs", {})
+            if isinstance(kwargs, dict):
+                kwargs["enable_thinking"] = False
+            return
+        existing = payload.get("chat_template_kwargs")
+        if isinstance(existing, dict):
+            existing["enable_thinking"] = False
+        else:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
     @staticmethod
     def _effort_to_thinking_budget(effort: str) -> int | None:
@@ -374,10 +440,48 @@ class LLMClient:
             container["thinking_budget"] = budget
         return False
 
+    def _sanitize_qwen38_thinking_params(
+        self,
+        payload: dict,
+        model: str,
+        *,
+        disable_from_payload: bool,
+        disable_from_extra: bool,
+        has_budget: bool,
+    ) -> None:
+        """Qwen3.8 特化思考参数清洗（27B/max/flash）。"""
+        effort_raw = payload.pop("reasoning_effort", None) or self.reasoning_effort or ""
+        effort = effort_raw.strip().lower() if isinstance(effort_raw, str) else ""
+
+        if disable_from_payload or disable_from_extra or effort in {"none", "off"}:
+            self._set_qwen38_disable_thinking(payload)
+            return
+
+        # auto / 空档：不发思考参数，走模型默认（禁止把 auto 映射成 xhigh）
+        if not effort or effort == "auto":
+            return
+
+        if self._is_qwen38_flash_model(model):
+            if has_budget:
+                return
+            budget = self._effort_to_thinking_budget(effort)
+            if budget is not None:
+                payload["thinking_budget"] = budget
+            return
+
+        # Qwen3.8 非 flash（27B、max 等）：映射 reasoning_effort，不用 thinking_budget
+        if has_budget:
+            return
+        mapped = self._map_qwen38_reasoning_effort(effort)
+        if mapped:
+            payload["reasoning_effort"] = mapped
+
     def _sanitize_qwen_thinking_params(self, payload: dict, model: str) -> None:
         """按 Qwen 模型族清洗思考参数（必须在 extra_payload merge 之后调用）。
 
-        - qwen3.8-max：保留 reasoning_effort；与 thinking_budget 冲突时 budget 优先
+        - Qwen3.8：flash 走 thinking_budget；27B/max 映射 reasoning_effort；
+          none/off 写 enable_thinking + chat_template_kwargs
+        - 非 Qwen3.8 的 qwen3.8-max（归一化 key）：保留原 max 族逻辑
         - 其余 Qwen：不发 reasoning_effort，档位转 thinking_budget 或 enable_thinking
         """
         if not self._is_qwen_model(model):
@@ -395,6 +499,16 @@ class LLMClient:
             "thinking_budget" in payload
             or (extra_body_dict is not None and "thinking_budget" in extra_body_dict)
         )
+
+        if self._is_qwen38_model(model):
+            self._sanitize_qwen38_thinking_params(
+                payload,
+                model,
+                disable_from_payload=disable_from_payload,
+                disable_from_extra=disable_from_extra,
+                has_budget=has_budget,
+            )
+            return
 
         if self._is_qwen38_max_model(model):
             # max 族：保留 reasoning_effort；budget 与 effort 同时存在时 budget 优先
@@ -488,8 +602,7 @@ class LLMClient:
             StreamChunk 增量数据
         """
         url = f"{self.base_url}/chat/completions"
-        # Gemini 兼容网关兜底：确保至少含一条 user 消息
-        messages = self._ensure_user_message(messages)
+        messages = self._prepare_messages_for_model(messages, model)
         payload: dict = {
             "model": model,
             "messages": messages,
@@ -660,10 +773,17 @@ class LLMClient:
         if not choices:
             return None
 
-        delta = choices[0].get("delta", {})
+        choice0 = choices[0] if isinstance(choices[0], dict) else {}
+        delta = choice0.get("delta", {}) or {}
+        if not isinstance(delta, dict):
+            delta = {}
         content = delta.get("content", "") or ""
-        reasoning_content = delta.get("reasoning_content", "") or ""
-        finish_reason = choices[0].get("finish_reason")
+        # 兼容 DeepSeek reasoning_content / OpenRouter reasoning / 部分网关 thinking
+        reasoning_content = LLMClient._extract_reasoning_text(delta)
+        if not reasoning_content:
+            # 少数网关把推理挂在 choice 顶层而非 delta
+            reasoning_content = LLMClient._extract_reasoning_text(choice0)
+        finish_reason = choice0.get("finish_reason")
 
         if not content and not reasoning_content and not finish_reason:
             return None
@@ -673,6 +793,62 @@ class LLMClient:
             reasoning_content=reasoning_content,
             finish_reason=finish_reason,
         )
+
+    @staticmethod
+    def _extract_reasoning_text(payload: dict | None) -> str:
+        """从 delta/message 字典提取模型自带思维链文本。
+
+        兼容多种 OpenAI 兼容网关字段：
+        - ``reasoning_content``（DeepSeek / 多数中转）
+        - ``reasoning``（OpenRouter / 部分 o 系列兼容）
+        - ``thinking`` / ``reasoning_text``（少数网关）
+        - 嵌套 dict（如 ``{"content": "..."}`` / ``{"text": "..."}``）
+        """
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("reasoning_content", "reasoning", "thinking", "reasoning_text"):
+            value = payload.get(key)
+            if value is None or value is False:
+                continue
+            if isinstance(value, str):
+                if value:
+                    return value
+                continue
+            if isinstance(value, dict):
+                nested = (
+                    value.get("content")
+                    or value.get("text")
+                    or value.get("reasoning")
+                    or value.get("thinking")
+                    or ""
+                )
+                if isinstance(nested, str) and nested:
+                    return nested
+                continue
+            if isinstance(value, list):
+                parts: list[str] = []
+                for item in value:
+                    if isinstance(item, str) and item:
+                        parts.append(item)
+                    elif isinstance(item, dict):
+                        piece = (
+                            item.get("content")
+                            or item.get("text")
+                            or item.get("thinking")
+                            or ""
+                        )
+                        if isinstance(piece, str) and piece:
+                            parts.append(piece)
+                if parts:
+                    return "".join(parts)
+        return ""
+
+    @staticmethod
+    def extract_message_reasoning(message: dict | None) -> str:
+        """从非流式 ``message`` 对象提取推理文本（字段兼容同流式）。"""
+        if not isinstance(message, dict):
+            return ""
+        return LLMClient._extract_reasoning_text(message)
 
     @staticmethod
     def _parse_error_body(body: str) -> str:
@@ -717,6 +893,45 @@ class LLMClient:
         result[-1]["role"] = "user"
         return result
 
+    @staticmethod
+    def _merge_system_messages(messages: list[dict]) -> list[dict]:
+        """合并多条 system 为一条并置于首位（Qwen3.8 chat template 要求）。
+
+        仅当存在多条 system，或唯一 system 不在 index 0 时才合并。
+        使用副本，不修改调用方原始列表。
+        """
+        if not messages:
+            return messages
+        system_indices = [
+            i for i, m in enumerate(messages) if m.get("role") == "system"
+        ]
+        if not system_indices:
+            return messages
+        if len(system_indices) == 1 and system_indices[0] == 0:
+            return messages
+
+        parts: list[str] = []
+        for m in messages:
+            if m.get("role") == "system":
+                content = m.get("content", "")
+                if content:
+                    parts.append(content)
+        non_system = [dict(m) for m in messages if m.get("role") != "system"]
+        if not parts:
+            return non_system
+        merged = {"role": "system", "content": "\n\n".join(parts)}
+        return [merged] + non_system
+
+    def _prepare_messages_for_model(self, messages: list[dict], _model: str) -> list[dict]:
+        """发送前归一化 messages：Gemini 兜底 + 按端点选项合并 system。
+
+        ``_model`` 保留与调用方签名一致；是否合并只看 ``merge_system_messages``。
+        """
+        messages = self._ensure_user_message(messages)
+        if self.merge_system_messages:
+            messages = self._merge_system_messages(messages)
+        return messages
+
     async def chat_completion(
         self,
         messages: list[dict],
@@ -754,8 +969,7 @@ class LLMClient:
             LLMError: 网络或其他错误
         """
         url = f"{self.base_url}/chat/completions"
-        # Gemini 兼容网关兜底：确保至少含一条 user 消息
-        messages = self._ensure_user_message(messages)
+        messages = self._prepare_messages_for_model(messages, model)
         payload: dict = {
             "model": model,
             "messages": messages,

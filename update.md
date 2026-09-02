@@ -2,6 +2,142 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-09-02：v0.2.22 审查修复——旧 swipe 二次后处理 / 原生 think 剥离 / 卷 raw_content
+
+### 背景
+
+未提交 v0.2.22 代码审查：旧 swipe 无 `raw_content` 时展示会二次后处理；原生 `<think>` 只进思维链区未从正文删除；卷续写未落盘原文；Qwen3.8 `auto` 被映射成 `xhigh`。
+
+### 核心改动
+
+1. **展示**：无 `raw_content` 只显示入库 `content`；有原文时开正则显示 `content`、关正则显示原文
+2. **持久化**：`post_process_content` 先 `strip_native_think_blocks`；`raw_content` 保留删除前原文
+3. **卷续写**：各章写作/重写返回原文，Continuation 拼接 `raw_content`；调试覆盖 LLMClient 透传 `proxy`
+4. **Qwen3.8**：`auto` / 空档不发送思考参数
+5. **默认正则**：新增 `nf_regex_hide_native_think`；`ensure_default_scripts_exist` 按 id 补齐
+6. **思维链 UI**：随 50ms flush 节流；`<novelforge_thinking>` 提取全部段落
+
+### 测试
+
+- `pytest tests/test_output_panel_prefs.py tests/test_reasoning_effort.py tests/test_chapter_switch_state.py tests/test_regex_service_defaults.py tests/test_chapter_models.py -q`
+
+### 文档同步
+
+- `agent.md` / `README.md` / `update.md`
+
+## 2026-09-02：v0.2.22——修复模型自带思维链未显示
+
+### 背景
+
+续写输出栏「查看思维链」开启后，模型原生推理（非预设 `<novelforge_thinking>`）经常空白。
+
+### 核心改动
+
+1. **SSE/非流式解析**：兼容 `reasoning_content` / `reasoning` / `thinking` / 嵌套 dict
+2. **正文回退**：从 `<think>...</think>` 提取并写入 `reasoning_content` / 展示区
+3. **展示**：流式正文增量也会刷新思维链区；标签改为「模型思维链」「预设思维链」
+
+### 测试
+
+- `pytest tests/test_output_panel_prefs.py -q`
+
+### 文档同步
+
+- `agent.md` / `README.md` / `update.md` / `__version__`：v0.2.22
+
+## 2026-09-02：v0.2.22——续写输出栏思维链查看 + 正则开关
+
+### 背景
+
+用户希望在续写输出栏直接查看当前段的思维链，并能控制是否对 AI 输出套用后处理正则。
+
+### 核心改动
+
+1. **输出栏 UI**：「查看思维链」「使用正则」与「自动滚动跟随」同排；思维链只读区位于输出框上方
+2. **后处理**：`post_processor.extract_thinking_content` / `compose_thinking_display`；`post_process_content(apply_regex=...)`
+3. **数据**：`Continuation.raw_content` + SQLite 迁移；生成时按 `apply_regex` 决定是否套 AI_OUTPUT 正则
+4. **配置**：`continuation.show_thinking`（默认关）/ `continuation.apply_regex`（默认开）跨会话持久化
+5. **Worker**：`reasoning_received` 接回输出栏；卷续写 `_post_process` 同步读 `apply_regex`
+
+### 测试
+
+- `pytest tests/test_output_panel_prefs.py -q`
+
+### 文档同步
+
+- `agent.md` / `README.md` / `update.md` / `__version__`：v0.2.22
+
+## 2026-09-01：合并 system 改为两档，默认不合并（并入 v0.2.22）
+
+### 背景
+
+用户要求去掉「自动」档，只保留合并/不合并，默认不合并，由用户自行决定。
+
+### 核心改动
+
+1. **端点字段** `merge_system_messages` 改为 bool，默认 `False`
+2. **兼容旧值**：`always` → 合并；`auto`/`never`/空 → 不合并
+3. **UI**：下拉仅「不合并」「合并」
+4. **LLMClient**：开启时对任意模型合并，不再按 Qwen3.8 模型名自动判断
+
+### 测试
+
+- `pytest tests/test_reasoning_effort.py -q`
+
+### 文档同步
+
+- 变更并入发版版本 **v0.2.22**
+
+## 2026-09-01：端点「合并 system 消息」选项（并入 v0.2.22）
+
+### 背景
+
+Qwen3.8 的 system 合并已落地，但中转别名不含 `qwen3.8` 时不会自动合并，用户希望有显式开关控制是否合并。
+
+### 核心改动
+
+1. **端点字段** `merge_system_messages`（后改为 bool 两档，见上条）
+2. **设置 UI**：端点编辑增加「合并 system 消息」
+3. **LLMClient** 构造接收该字段；按选项决策是否合并
+4. **透传**：ContinuationWorker / AuditWorker / VolumeOrchestrator / 四类 extractor / main_window 全部接线
+
+### 测试
+
+- `pytest tests/test_reasoning_effort.py -q`
+
+### 文档同步
+
+- 变更并入发版版本 **v0.2.22**
+
+## 2026-08-31：v0.2.22 发版——Qwen3.8 system 合并 + 禁止推理
+
+### 背景
+
+使用 Qwen3.8-27B 时 vLLM/兼容网关返回 400：`System message must be at the beginning.`。Qwen3.8 chat template 要求 messages 中最多一条 system 且必须在 index 0，而赓笔 ST 风格预设会发出多条 system（含 worldInfoAfter 等）。用户还要求在思考强度界面新增「禁止推理」选项。
+
+### 核心改动
+
+1. **Qwen3.8 特化 system 合并（`llm_client.py`）**
+   - `_is_qwen38_model`：原始模型名检测 `qwen3.8`/`qwen-3.8`，不误伤 `Qwen3-8B`
+   - `_merge_system_messages` + `_prepare_messages_for_model`：仅 Qwen3.8 在 `_ensure_user_message` 后合并多条 system；GPT/Claude/其它 Qwen 不变
+
+2. **思考强度「禁止推理」**
+   - `settings_dialog.REASONING_EFFORT_OPTIONS` 新增 `("禁止推理", "none")`
+   - `format_reasoning_effort_label` 端点列表展示
+
+3. **Qwen3.8 思考参数**
+   - `_sanitize_qwen38_thinking_params`：flash 仍走 thinking_budget；27B/max 映射 reasoning_effort→xhigh/medium/low
+   - none/off 写 `enable_thinking=false` + `chat_template_kwargs.enable_thinking=false`
+
+### 测试
+
+- `pytest tests/test_reasoning_effort.py -q`：50 通过
+
+### 文档同步
+
+- `agent.md` / `README.md` / `update.md`：v0.2.22
+- `novelforge/__init__.py`：0.2.22
+
 ## 2026-08-27：v0.2.21 发版——思考强度改由端点控制 + 修复 Qwen thinking_budget 400
 
 ### 背景

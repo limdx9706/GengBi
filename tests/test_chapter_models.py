@@ -48,6 +48,7 @@ def test_continuation_defaults() -> None:
     assert cont.extracted_context_snapshot == []
     assert cont.prompt_snapshot == []
     assert cont.reasoning_content is None
+    assert cont.raw_content == ""
     assert cont.agent_artifacts is None
     # datetime 字段应有默认值
     assert isinstance(cont.created_at, datetime)

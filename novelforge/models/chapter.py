@@ -30,6 +30,7 @@ class Continuation(BaseModel):
     - ``extracted_context_snapshot``：上下文提取条目快照
     - ``prompt_snapshot``：发送给 LLM 的 messages 数组快照
     - ``reasoning_content``：推理内容（DeepSeek/xAI 等），不参与后续提示词组装
+    - ``raw_content``：后处理前 LLM 原文（供输出栏切换正则/查看思维链）
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -37,6 +38,7 @@ class Continuation(BaseModel):
     id: str
     created_at: datetime = Field(default_factory=datetime.now)
     content: str = ""
+    raw_content: str = ""
     model: str = ""
     is_accepted: bool = False
     parent_id: str | None = None

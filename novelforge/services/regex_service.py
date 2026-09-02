@@ -574,8 +574,8 @@ class RegexService:
     def ensure_default_scripts_exist(self) -> list[RegexScript]:
         """确保全局正则含默认脚本（首次运行或升级后注入）。
 
-        若 global.json 不存在或为空数组，写入默认正则脚本；
-        已含脚本时不覆盖（保留用户自定义）。
+        若 global.json 不存在或为空数组，写入全部默认正则；
+        已含脚本时不覆盖已有条目，仅按 id 补齐缺失的内置脚本。
 
         Returns:
             全局作用域的正则脚本列表
@@ -587,22 +587,31 @@ class RegexService:
             save_json_with_backup(global_path, [])
             logger.info("已创建空的全局正则脚本文件: %s", global_path)
 
-        # 读取现有脚本，判断是否为空
+        default_scripts = self.load_default_scripts()
         existing = self.load_scripts(SCOPE_GLOBAL)
-        if existing:
+        if not default_scripts:
             return existing
 
-        # 空数组：写入默认脚本
-        default_scripts = self.load_default_scripts()
-        if not default_scripts:
-            return []
+        if not existing:
+            data = [
+                s.model_dump(mode="json", by_alias=True)
+                for s in default_scripts
+            ]
+            save_json_with_backup(global_path, data)
+            logger.info(
+                "已注入 %d 条默认正则脚本到全局作用域", len(default_scripts)
+            )
+            return default_scripts
 
-        data = [
-            s.model_dump(mode="json", by_alias=True)
-            for s in default_scripts
-        ]
+        existing_ids = {s.id for s in existing}
+        missing = [s for s in default_scripts if s.id not in existing_ids]
+        if not missing:
+            return existing
+
+        merged = existing + missing
+        data = [s.model_dump(mode="json", by_alias=True) for s in merged]
         save_json_with_backup(global_path, data)
         logger.info(
-            "已注入 %d 条默认正则脚本到全局作用域", len(default_scripts)
+            "已补齐 %d 条内置正则脚本到全局作用域", len(missing)
         )
-        return default_scripts
+        return merged

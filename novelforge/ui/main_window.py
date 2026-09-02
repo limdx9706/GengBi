@@ -337,6 +337,7 @@ class MainWindow(QMainWindow):
         self._custom_character_stream_text_by_chapter: dict[str, str] = {}  # 按章节缓冲自定义角色提取流式文本
         self._continuation_chapter_id: str | None = None  # 单章续写发起章节
         self._continuation_stream_text_by_chapter: dict[str, str] = {}  # 续写流式文本
+        self._continuation_reasoning_by_chapter: dict[str, str] = {}  # 续写 API 推理缓冲
         self._audit_chapter_id: str | None = None  # 审计发起章节
         self._volume_chapter_id: str | None = None  # 卷续写发起章节（插入点）
 
@@ -447,8 +448,9 @@ class MainWindow(QMainWindow):
 
         # 第 5 栏：续写输出（独立分栏）
         output_panel = CollapsiblePanel("续写输出")
+        output_panel.add_widget(self.continuation_panel.thinking_edit)
         output_panel.add_widget(self.continuation_panel.output_edit)
-        output_panel.add_widget(self.continuation_panel.auto_scroll_check)
+        output_panel.add_widget(self.continuation_panel.output_options_host)
         output_panel.setMinimumWidth(280)
 
         splitter.addWidget(left_panel)
@@ -521,6 +523,9 @@ class MainWindow(QMainWindow):
         )
         self.continuation_panel.model_user_changed.connect(
             self._on_panel_model_changed
+        )
+        self.continuation_panel.output_prefs_changed.connect(
+            self._on_output_prefs_changed
         )
         # 卷模式切换时显隐右侧续写输出面板
         self.continuation_panel.output_panel_visibility_requested.connect(
@@ -1315,6 +1320,10 @@ class MainWindow(QMainWindow):
                 "inject_lookback_protagonist": cont.get("inject_lookback_protagonist", False),
                 "inject_lookback_custom_characters": cont.get("inject_lookback_custom_characters", False),
             })
+            self.continuation_panel.set_output_prefs(
+                bool(cont.get("show_thinking", False)),
+                bool(cont.get("apply_regex", True)),
+            )
             # 恢复持久化的每端点模型记忆，供 _on_endpoint_changed 读取
             mapping = self.config_manager.get_last_model_per_endpoint()
             if mapping:
@@ -1514,7 +1523,10 @@ class MainWindow(QMainWindow):
         if (self._continuation_chapter_id == chapter.id
                 and chapter.id in self._continuation_stream_text_by_chapter):
             buffered = self._continuation_stream_text_by_chapter[chapter.id]
-            self.continuation_panel.restore_streaming_state(buffered)
+            reasoning_buffered = self._continuation_reasoning_by_chapter.get(chapter.id, "")
+            self.continuation_panel.restore_streaming_state(
+                buffered, reasoning_text=reasoning_buffered
+            )
             self.chapter_editor.set_streaming_locked(True)
         else:
             # 否则：正常显示已有 swipe 或清空输出
@@ -1524,6 +1536,8 @@ class MainWindow(QMainWindow):
                 self.continuation_panel.set_current_swipe(last_swipe, chapter.continuations)
             else:
                 self.continuation_panel.clear_output()
+
+        self._sync_output_process_context()
 
         # 切换后：加载新章节的上下文提取结果
         self._load_context_entries_for_chapter(chapter)
@@ -1908,6 +1922,7 @@ class MainWindow(QMainWindow):
             cont["inject_lookback_context"] = params.get("inject_lookback_context", False)
             cont["inject_lookback_protagonist"] = params.get("inject_lookback_protagonist", False)
             cont["inject_lookback_custom_characters"] = params.get("inject_lookback_custom_characters", False)
+            cont["apply_regex"] = params.get("apply_regex", True)
             self.config_manager.save()
         except Exception as e:
             logger.warning("保存续写参数失败: %s", e)
@@ -2113,6 +2128,7 @@ class MainWindow(QMainWindow):
         if old_worker is not None:
             try:
                 old_worker.chunk_received.disconnect()
+                old_worker.reasoning_received.disconnect()
                 old_worker.token_count.disconnect()
                 old_worker.finished.disconnect()
                 old_worker.error.disconnect()
@@ -2126,8 +2142,8 @@ class MainWindow(QMainWindow):
         self._continuation_chapter_id = self._current_chapter.id
         # 初始化按章节缓冲的流式输出（切回时恢复 UI）
         self._continuation_stream_text_by_chapter[self._continuation_chapter_id] = ""
-
-        # 注入思考强度（仅端点级）
+        self._continuation_reasoning_by_chapter[self._continuation_chapter_id] = ""
+        self._sync_output_process_context()
         params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint)
 
         # 创建并启动 worker（M4: 注入 extracted_context_snapshot）
@@ -2152,28 +2168,18 @@ class MainWindow(QMainWindow):
             debug_mode=self._debug_mode,
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            merge_system_messages=endpoint.get("merge_system_messages", False),
             proxy=self._get_network_proxy(),
             prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
-        # chunk 路由：按章节缓冲，仅当前章节匹配时更新 UI（避免污染新章节视图）
-        self._continuation_worker.chunk_received.connect(
-            self._on_continuation_chunk_received
-        )
+        # chunk / 推理路由：按章节缓冲，仅当前章节匹配时更新 UI
+        self._connect_continuation_worker_ui(self._continuation_worker)
         self._continuation_worker.token_count.connect(
             lambda count: self._token_count_label.setText(
                 f"Token: {count} (接收中)"
             )
-        )
-        self._continuation_worker.finished.connect(self._on_continuation_finished)
-        self._continuation_worker.error.connect(self._on_continuation_error)
-        self._continuation_worker.rate_limit_warning.connect(
-            lambda msg: self.continuation_panel.show_toast(msg)
-        )
-        self._continuation_worker.auth_error.connect(self._on_auth_error)
-        self._continuation_worker.prompt_debug_requested.connect(
-            self._on_prompt_debug_requested
         )
 
         self._continuation_worker.start()
@@ -2582,6 +2588,7 @@ class MainWindow(QMainWindow):
             phase_inputs=self._volume_state,
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            merge_system_messages=endpoint.get("merge_system_messages", False),
             proxy=self._get_network_proxy(),
             prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
@@ -5608,6 +5615,51 @@ class MainWindow(QMainWindow):
         if self._current_chapter and self._current_chapter.id == cid:
             self.continuation_panel.append_chunk(chunk)
 
+    def _on_continuation_reasoning_received(self, chunk: str) -> None:
+        """续写 API 推理 chunk 路由（镜像正文 chunk 缓冲）。"""
+        cid = self._continuation_chapter_id
+        if cid is None:
+            return
+        self._continuation_reasoning_by_chapter[cid] = (
+            self._continuation_reasoning_by_chapter.get(cid, "") + chunk
+        )
+        if self._current_chapter and self._current_chapter.id == cid:
+            self.continuation_panel.append_reasoning(chunk)
+
+    def _connect_continuation_worker_ui(self, worker: Any) -> None:
+        """连接 ContinuationWorker 与 UI 的流式信号（正文 + 推理）。"""
+        worker.chunk_received.connect(self._on_continuation_chunk_received)
+        worker.reasoning_received.connect(self._on_continuation_reasoning_received)
+        worker.finished.connect(self._on_continuation_finished)
+        worker.error.connect(self._on_continuation_error)
+        worker.rate_limit_warning.connect(
+            lambda msg: self.continuation_panel.show_toast(msg)
+        )
+        worker.auth_error.connect(self._on_auth_error)
+        worker.prompt_debug_requested.connect(self._on_prompt_debug_requested)
+
+    def _on_output_prefs_changed(self, show_thinking: bool, apply_regex: bool) -> None:
+        """持久化输出栏开关偏好。"""
+        try:
+            cont = self.config_manager.config.setdefault("continuation", {})
+            cont["show_thinking"] = show_thinking
+            cont["apply_regex"] = apply_regex
+            self.config_manager.save()
+        except Exception as e:
+            logger.warning("保存输出栏偏好失败: %s", e)
+
+    def _sync_output_process_context(self) -> None:
+        """同步后处理上下文到续写输出栏（正则开关刷新显示用）。"""
+        chapter_metadata: dict[str, Any] = {}
+        if self._current_chapter:
+            chapter_metadata = dict(getattr(self._current_chapter, "metadata", {}) or {})
+        self.continuation_panel.set_output_process_context(
+            self.regex_engine,
+            self.template_engine,
+            project_id=self._current_project_id or "",
+            chapter_metadata=chapter_metadata,
+        )
+
     def _on_continuation_finished(self, continuation: Continuation) -> None:
         """续写完成（单次续写流程）。
 
@@ -5642,6 +5694,7 @@ class MainWindow(QMainWindow):
         # 清理缓冲与发起章节标记
         if cid:
             self._continuation_stream_text_by_chapter.pop(cid, None)
+            self._continuation_reasoning_by_chapter.pop(cid, None)
         self._continuation_chapter_id = None
 
         # M5: 记录历史日志
@@ -5671,6 +5724,7 @@ class MainWindow(QMainWindow):
         # 清理缓冲与发起章节标记
         if cid:
             self._continuation_stream_text_by_chapter.pop(cid, None)
+            self._continuation_reasoning_by_chapter.pop(cid, None)
         self._continuation_chapter_id = None
 
         # M5: 记录历史日志（失败）
@@ -6277,6 +6331,7 @@ class MainWindow(QMainWindow):
             phase_name="单章审计",
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            merge_system_messages=endpoint.get("merge_system_messages", False),
             proxy=self._get_network_proxy(),
             prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
@@ -6462,6 +6517,8 @@ class MainWindow(QMainWindow):
         # 记录续写发起章节（rewrite worker 完成回调用此 id 归档 swipe）
         self._continuation_chapter_id = audit_cid
         self._continuation_stream_text_by_chapter[audit_cid] = ""
+        self._continuation_reasoning_by_chapter[audit_cid] = ""
+        self._sync_output_process_context()
 
         # 记录续写会话追踪信息
         self._continuation_started_at = self.history_service.now_iso()
@@ -6474,6 +6531,7 @@ class MainWindow(QMainWindow):
         if old_worker is not None:
             try:
                 old_worker.chunk_received.disconnect()
+                old_worker.reasoning_received.disconnect()
                 old_worker.token_count.disconnect()
                 old_worker.finished.disconnect()
                 old_worker.error.disconnect()
@@ -6521,28 +6579,18 @@ class MainWindow(QMainWindow):
             debug_mode=self._debug_mode,
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            merge_system_messages=endpoint.get("merge_system_messages", False),
             proxy=self._get_network_proxy(),
             prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
-        # chunk 路由：按章节缓冲，仅当前章节匹配时更新 UI
-        self._continuation_worker.chunk_received.connect(
-            self._on_continuation_chunk_received
-        )
+        # chunk / 推理路由：按章节缓冲，仅当前章节匹配时更新 UI
+        self._connect_continuation_worker_ui(self._continuation_worker)
         self._continuation_worker.token_count.connect(
             lambda count: self._token_count_label.setText(
                 f"Token: {count} (修正中)"
             )
-        )
-        self._continuation_worker.finished.connect(self._on_continuation_finished)
-        self._continuation_worker.error.connect(self._on_continuation_error)
-        self._continuation_worker.rate_limit_warning.connect(
-            lambda msg: self.continuation_panel.show_toast(msg)
-        )
-        self._continuation_worker.auth_error.connect(self._on_auth_error)
-        self._continuation_worker.prompt_debug_requested.connect(
-            self._on_prompt_debug_requested
         )
 
         self._continuation_worker.start()
@@ -6643,6 +6691,7 @@ class MainWindow(QMainWindow):
             cont["inject_lookback_context"] = params.get("inject_lookback_context", False)
             cont["inject_lookback_protagonist"] = params.get("inject_lookback_protagonist", False)
             cont["inject_lookback_custom_characters"] = params.get("inject_lookback_custom_characters", False)
+            cont["apply_regex"] = params.get("apply_regex", True)
             self.config_manager.save()
         except Exception as e:
             logger.warning("保存续写参数失败: %s", e)
@@ -6761,6 +6810,7 @@ class MainWindow(QMainWindow):
             phase_name="重写需求分析",
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            merge_system_messages=endpoint.get("merge_system_messages", False),
             proxy=self._get_network_proxy(),
             prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
@@ -7030,6 +7080,7 @@ class MainWindow(QMainWindow):
         if old_worker is not None:
             try:
                 old_worker.chunk_received.disconnect()
+                old_worker.reasoning_received.disconnect()
                 old_worker.token_count.disconnect()
                 old_worker.finished.disconnect()
                 old_worker.error.disconnect()
@@ -7042,6 +7093,8 @@ class MainWindow(QMainWindow):
         # 记录续写发起章节（完成回调用此 id 归档 swipe）
         self._continuation_chapter_id = rewrite_cid
         self._continuation_stream_text_by_chapter[rewrite_cid] = ""
+        self._continuation_reasoning_by_chapter[rewrite_cid] = ""
+        self._sync_output_process_context()
 
         # 注入思考强度（重写续写：single_continuation 端点，仅端点级）
         # 复用 single_continuation 端点（与单章续写一致）
@@ -7070,28 +7123,18 @@ class MainWindow(QMainWindow):
             debug_mode=self._debug_mode,
             extra_payload=single_endpoint.get("extra_payload") or {},
             extra_headers=single_endpoint.get("extra_headers") or {},
+            merge_system_messages=single_endpoint.get("merge_system_messages", False),
             proxy=self._get_network_proxy(),
             prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
-        # chunk 路由：按章节缓冲，仅当前章节匹配时更新 UI
-        self._continuation_worker.chunk_received.connect(
-            self._on_continuation_chunk_received
-        )
+        # chunk / 推理路由：按章节缓冲，仅当前章节匹配时更新 UI
+        self._connect_continuation_worker_ui(self._continuation_worker)
         self._continuation_worker.token_count.connect(
             lambda count: self._token_count_label.setText(
                 f"Token: {count} (重写中)"
             )
-        )
-        self._continuation_worker.finished.connect(self._on_continuation_finished)
-        self._continuation_worker.error.connect(self._on_continuation_error)
-        self._continuation_worker.rate_limit_warning.connect(
-            lambda msg: self.continuation_panel.show_toast(msg)
-        )
-        self._continuation_worker.auth_error.connect(self._on_auth_error)
-        self._continuation_worker.prompt_debug_requested.connect(
-            self._on_prompt_debug_requested
         )
 
         self._continuation_worker.start()
@@ -7250,6 +7293,7 @@ class MainWindow(QMainWindow):
             phase_name=phase_name,
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            merge_system_messages=endpoint.get("merge_system_messages", False),
             proxy=self._get_network_proxy(),
             prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
@@ -7382,6 +7426,7 @@ class MainWindow(QMainWindow):
             phase_name="细纲修改",
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            merge_system_messages=endpoint.get("merge_system_messages", False),
             proxy=self._get_network_proxy(),
             prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
@@ -7820,6 +7865,7 @@ class MainWindow(QMainWindow):
             scripts = [script for script, _ in ordered]
             self.regex_engine.compile_scripts(scripts)
             logger.debug("已编译 %d 个正则脚本到引擎", len(scripts))
+            self._sync_output_process_context()
         except Exception as e:
             logger.error("刷新正则脚本失败: %s", e, exc_info=True)
 

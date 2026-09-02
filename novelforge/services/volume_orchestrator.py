@@ -31,7 +31,10 @@ from typing import Any
 from PySide6.QtCore import QThread, Signal
 
 from novelforge.core.json_utils import parse_json_response
-from novelforge.core.post_processor import post_process_content
+from novelforge.core.post_processor import (
+    extract_native_think_content,
+    post_process_content,
+)
 from novelforge.core.prompt_assembler import PromptAssembler
 from novelforge.core.token_counter import count_text_tokens
 from novelforge.models import (
@@ -57,6 +60,7 @@ from novelforge.services.llm_client import (
     LLMClient,
     LLMError,
     RateLimitError,
+    coerce_merge_system_messages,
 )
 from novelforge.services.storage_service import _generate_id
 from novelforge.utils.outline_serializer import format_outline
@@ -154,6 +158,7 @@ class VolumeOrchestrator(QThread):
         phase_inputs: dict[str, Any] | None = None,
         extra_payload: dict | None = None,
         extra_headers: dict | None = None,
+        merge_system_messages: bool | str = False,
         proxy: str | None = None,
         prefer_non_stream: bool = False,
         parent=None,
@@ -190,6 +195,7 @@ class VolumeOrchestrator(QThread):
             phase_inputs: 单阶段模式的输入产物（如 {"deep_analysis": DeepAnalysis对象}）
             extra_payload: 自定义请求体字段（deep merge 到 payload）
             extra_headers: 自定义 HTTP 头（update 到 headers）
+            merge_system_messages: 是否合并 system 消息（默认 False=不合并）
             proxy: HTTP/HTTPS 代理 URL（None 表示不走代理）
             prefer_non_stream: True 时章节写作/重写走 chat_completion
             parent: 父 QObject
@@ -202,6 +208,7 @@ class VolumeOrchestrator(QThread):
         # 自定义请求扩展（透传给 LLMClient）
         self.extra_payload: dict = extra_payload or {}
         self.extra_headers: dict = extra_headers or {}
+        self.merge_system_messages = coerce_merge_system_messages(merge_system_messages)
         # 网络代理（透传给 LLMClient）
         self.proxy = proxy
         # 全局非流式开关（默认 False=流式）
@@ -390,6 +397,12 @@ class VolumeOrchestrator(QThread):
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
                 extra_payload=self._debug_override_endpoint.get("extra_payload") or {},
                 extra_headers=self._debug_override_endpoint.get("extra_headers") or {},
+                merge_system_messages=coerce_merge_system_messages(
+                    self._debug_override_endpoint.get(
+                        "merge_system_messages", self.merge_system_messages
+                    )
+                ),
+                proxy=self.proxy,
             )
             if ep_id:
                 self._debug_clients[ep_id] = client
@@ -470,6 +483,7 @@ class VolumeOrchestrator(QThread):
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
                 extra_payload=self.extra_payload,
                 extra_headers=self.extra_headers,
+                merge_system_messages=self.merge_system_messages,
                 proxy=self.proxy,
             )
 
@@ -729,6 +743,7 @@ class VolumeOrchestrator(QThread):
         previous_chapter_text = self.current_chapter.content or ""
         chapter_count = self.config.chapter_count
         reasoning = ""  # 初始化，防 chapter_count=0 时 NameError
+        raw_chapter_texts: list[str] = []
         for i in range(chapter_count):
             if self._stop_event.is_set():
                 logger.info("逐章循环在第 %d 章被停止", i)
@@ -736,6 +751,7 @@ class VolumeOrchestrator(QThread):
 
             self.chapter_started.emit(i)
             try:
+                chapter_raw = ""
                 chapter_plan = (
                     final_outline.chapters[i]
                     if final_outline is not None and i < len(final_outline.chapters)
@@ -763,7 +779,7 @@ class VolumeOrchestrator(QThread):
 
                 # 写作（初稿）
                 self.chapter_step_started.emit(i, "writing")
-                content, reasoning, messages = await self._run_chapter_writing(
+                content, reasoning, messages, chapter_raw = await self._run_chapter_writing(
                     outline,
                     chapter_plan,
                     previous_chapters_text,
@@ -822,7 +838,7 @@ class VolumeOrchestrator(QThread):
 
                             rounds += 1
                             self.chapter_step_started.emit(i, "revise")
-                            content, reasoning, messages = (
+                            content, reasoning, messages, chapter_raw = (
                                 await self._run_chapter_rewrite(
                                     outline,
                                     chapter_plan,
@@ -865,7 +881,7 @@ class VolumeOrchestrator(QThread):
                             # 用户反馈作为额外修改意见拼入 critique，直接调 _run_chapter_rewrite 重写
                             rounds += 1
                             self.chapter_step_started.emit(i, "revise")
-                            content, reasoning, messages = await self._run_chapter_rewrite(
+                            content, reasoning, messages, chapter_raw = await self._run_chapter_rewrite(
                                 outline, chapter_plan,
                                 content, None,
                                 lookback_chapters_text=dynamic_lookback,
@@ -919,7 +935,7 @@ class VolumeOrchestrator(QThread):
 
                                     rounds += 1
                                     self.chapter_step_started.emit(i, "revise")
-                                    content, reasoning, messages = (
+                                    content, reasoning, messages, chapter_raw = (
                                         await self._run_chapter_rewrite(
                                             outline, chapter_plan,
                                             content, critique,
@@ -956,6 +972,7 @@ class VolumeOrchestrator(QThread):
                     stages=stages,
                 )
                 artifacts.chapter_artifacts.append(chapter_artifacts)
+                raw_chapter_texts.append(chapter_raw)
 
                 # 将该章正文作为新 Chapter 追加到 chapters 列表供下一章前文
                 new_chapter = Chapter(
@@ -998,10 +1015,12 @@ class VolumeOrchestrator(QThread):
         full_content = "\n\n".join(
             ca.content for ca in artifacts.chapter_artifacts if ca.content
         )
+        full_raw = "\n\n".join(t for t in raw_chapter_texts if t)
         continuation = Continuation(
             id=_generate_id("sw_"),
             created_at=datetime.now(),
             content=full_content,
+            raw_content=full_raw,
             model=self.model,
             is_accepted=False,
             status="completed",
@@ -1727,7 +1746,7 @@ class VolumeOrchestrator(QThread):
         revision_guidance: dict | None = None,
         original_content: str = "",
         lookback_chapters_text: str = "",
-    ) -> tuple[str, str, list[dict[str, Any]]]:
+    ) -> tuple[str, str, list[dict[str, Any]], str]:
         """阶段④-写作：单章流式写作。
 
         复用 AgentOrchestrator._run_writing 的模式（在本类内重新实现）：
@@ -1748,7 +1767,7 @@ class VolumeOrchestrator(QThread):
             original_content: 当前已生成内容（修订时作为重写参考，空串表示无）
 
         Returns:
-            (content, reasoning_content, messages) 三元组
+            (final_content, reasoning_content, messages, raw_content) 四元组
         """
         # 格式化大纲并创建合成 ContextEntry
         if outline is not None:
@@ -1848,7 +1867,7 @@ class VolumeOrchestrator(QThread):
 
         # 调试模式确认
         if not await self._maybe_debug_prompt(messages, "章节写作"):
-            return "", "", []
+            return "", "", [], ""
 
         # 创建 async stop 事件（轮询 threading.Event）
         async_stop = asyncio.Event()
@@ -1865,10 +1884,10 @@ class VolumeOrchestrator(QThread):
             messages=messages, async_stop=async_stop
         )
 
-        # 后处理（正则 → 模板 → HTML 剥离）
+        # 后处理（剥离原生 think → 正则 → 模板 → HTML 剥离）
         final_content = self._post_process(content)
 
-        return final_content, reasoning, messages
+        return final_content, reasoning, messages, content
 
     async def _generate_chapter_text(
         self,
@@ -1901,7 +1920,7 @@ class VolumeOrchestrator(QThread):
             response = await client.chat_completion(**gen_kwargs)
             msg = (response.get("choices") or [{}])[0].get("message") or {}
             content = msg.get("content") or ""
-            reasoning = msg.get("reasoning_content") or ""
+            reasoning = LLMClient.extract_message_reasoning(msg)
             if content:
                 content_parts.append(content)
                 char_count = len(content)
@@ -1921,7 +1940,13 @@ class VolumeOrchestrator(QThread):
                     reasoning_parts.append(chunk.reasoning_content)
                     self.reasoning_received.emit(chunk.reasoning_content)
 
-        return "".join(content_parts), "".join(reasoning_parts)
+        content = "".join(content_parts)
+        reasoning = "".join(reasoning_parts)
+        if not reasoning and content:
+            reasoning = extract_native_think_content(content)
+            if reasoning:
+                self.reasoning_received.emit(reasoning)
+        return content, reasoning
 
     async def _run_chapter_rewrite(
         self,
@@ -1931,7 +1956,7 @@ class VolumeOrchestrator(QThread):
         critique: CritiqueReport | None,
         lookback_chapters_text: str = "",
         extra_feedback: str = "",
-    ) -> tuple[str, str, list[dict[str, Any]]]:
+    ) -> tuple[str, str, list[dict[str, Any]], str]:
         """阶段④-重写：审计后基于审计结果与修改意见重写完整章节正文（流式）。
 
         新流程：使用 phase_audit_rewrite.txt 独立模板，聚焦修改意见（审计报告整体即修改意见），
@@ -1952,7 +1977,7 @@ class VolumeOrchestrator(QThread):
             extra_feedback: 用户额外修改意见（after_chapter reject 场景，拼入 critique 文本末尾）
 
         Returns:
-            (content, reasoning_content, messages) 三元组
+            (final_content, reasoning_content, messages, raw_content) 四元组
         """
         template = self._load_agent_template("audit_rewrite")
 
@@ -2019,7 +2044,7 @@ class VolumeOrchestrator(QThread):
 
         # 调试模式确认
         if not await self._maybe_debug_prompt(messages, "章节重写"):
-            return "", "", []
+            return "", "", [], ""
 
         # 创建 async stop 事件（轮询 threading.Event）
         async_stop = asyncio.Event()
@@ -2036,10 +2061,10 @@ class VolumeOrchestrator(QThread):
             messages=messages, async_stop=async_stop
         )
 
-        # 后处理（正则 → 模板 → HTML 剥离）
+        # 后处理（剥离原生 think → 正则 → 模板 → HTML 剥离）
         final_content = self._post_process(content)
 
-        return final_content, reasoning, messages
+        return final_content, reasoning, messages, content
 
     async def _run_chapter_verify(
         self,
@@ -2388,12 +2413,14 @@ class VolumeOrchestrator(QThread):
 
     def _post_process(self, content: str) -> str:
         """后处理：正则 AI_OUTPUT → 模板 render_post_receive → HTML 剥离。"""
+        apply_regex = bool(self.parameters.get("apply_regex", True))
         return post_process_content(
             content,
             regex_engine=self.regex_engine,
             template_engine=self.template_engine,
             project_id=self.project_id,
             chapter_metadata=self.chapter_metadata,
+            apply_regex=apply_regex,
         )
 
     def _get_profile_field(self, field_name: str) -> str:

@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 
 from novelforge.core.config import ConfigManager
 from novelforge.services.async_runner import AsyncLoopRunner
-from novelforge.services.llm_client import LLMClient, LLMError
+from novelforge.services.llm_client import LLMClient, LLMError, coerce_merge_system_messages
 from novelforge.ui.helpers import parse_token_limit, select_combo_by_id
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 # 思考强度选项：(显示文本, 发送值)。「不发送」=空串，表示不写入 payload
 REASONING_EFFORT_OPTIONS: list[tuple[str, str]] = [
     ("不发送", ""),
+    ("禁止推理", "none"),
     ("auto", "auto"),
     ("minimal", "minimal"),
     ("low", "low"),
@@ -59,6 +60,28 @@ REASONING_EFFORT_OPTIONS: list[tuple[str, str]] = [
     ("high", "high"),
     ("max", "max"),
 ]
+
+REASONING_EFFORT_LABEL_BY_VALUE: dict[str, str] = {
+    value: label for label, value in REASONING_EFFORT_OPTIONS
+}
+
+# 合并 system 消息：（显示文本, 存储值 bool）
+MERGE_SYSTEM_OPTIONS: list[tuple[str, bool]] = [
+    ("不合并", False),
+    ("合并", True),
+]
+
+
+def format_reasoning_effort_label(value: str) -> str:
+    """将端点 reasoning_effort 存储值转为列表/tooltip 展示文本。"""
+    if not value:
+        return "不发送"
+    return REASONING_EFFORT_LABEL_BY_VALUE.get(value, value)
+
+
+def format_merge_system_label(value: Any) -> str:
+    """将端点 merge_system_messages 存储值转为展示文本。"""
+    return "合并" if coerce_merge_system_messages(value) else "不合并"
 
 
 class ModelFetchWorker(QThread):
@@ -254,9 +277,21 @@ class EndpointEditDialog(QDialog):
             "覆盖 OpenAI o 系列（minimal/low/medium/high）、DeepSeek V4（max）"
             "等 OpenAI 兼容网关；\n"
             "「不发送」表示不写入该字段，由模型默认行为决定。\n"
+            "「禁止推理」显式关闭思考（Qwen3.8 写 enable_thinking=false）。\n"
             "Qwen3.8-flash 等模型会在发送前自动转换为 thinking_budget。"
         )
         form.addRow("思考强度:", self._reasoning_effort_combo)
+
+        # 合并 system 消息：Qwen3.8 模板要求仅一条 system 且位于开头
+        self._merge_system_combo = QComboBox()
+        for label, value in MERGE_SYSTEM_OPTIONS:
+            self._merge_system_combo.addItem(label, value)
+        self._merge_system_combo.setToolTip(
+            "发送前是否将多条 system 消息合并为一条并置于开头。\n"
+            "部分模型（如 Qwen3.8）要求 system 只能出现在第一条，否则 400。\n"
+            "默认不合并；遇「System message must be at the beginning」时改为「合并」。"
+        )
+        form.addRow("合并 system 消息:", self._merge_system_combo)
 
         # 自定义请求体字段（JSON，deep merge 到 payload，如 zenmux provider_routing_strategy）
         self._extra_payload_edit = QPlainTextEdit()
@@ -316,6 +351,11 @@ class EndpointEditDialog(QDialog):
         # 思考强度：按保存值选中对应项
         select_combo_by_id(
             self._reasoning_effort_combo, self._endpoint.get("reasoning_effort", "")
+        )
+        # 合并 system：默认不合并；兼容旧 auto/always/never
+        select_combo_by_id(
+            self._merge_system_combo,
+            coerce_merge_system_messages(self._endpoint.get("merge_system_messages")),
         )
         # 自定义请求体字段 / HTTP 头：dict → JSON 文本回填
         extra_payload = self._endpoint.get("extra_payload") or {}
@@ -560,6 +600,9 @@ class EndpointEditDialog(QDialog):
             "models": models,
             "enabled_models": enabled_models,
             "reasoning_effort": self._reasoning_effort_combo.currentData(),
+            "merge_system_messages": coerce_merge_system_messages(
+                self._merge_system_combo.currentData()
+            ),
             "extra_payload": extra_payload,
             "extra_headers": extra_headers,
             "is_default": self._default_check.isChecked(),
@@ -773,7 +816,8 @@ class SettingsDialog(QDialog):
                 f"API Key: {mask_api_key(ep.get('api_key_encrypted', ''))}\n"
                 f"已启用模型: {len(ep.get('enabled_models', []) or [])} 个"
                 f"（默认: {ep.get('default_model', '未设置')}）\n"
-                f"思考强度: {ep.get('reasoning_effort', '') or '不发送'}"
+                f"思考强度: {format_reasoning_effort_label(ep.get('reasoning_effort', '') or '')}\n"
+                f"合并 system: {format_merge_system_label(ep.get('merge_system_messages'))}"
             )
             self._endpoint_list.addItem(item)
 
@@ -858,6 +902,11 @@ class SettingsDialog(QDialog):
             "models": list(ep.get("models", [])),
             "enabled_models": list(ep.get("enabled_models", [])),
             "reasoning_effort": ep.get("reasoning_effort", ""),
+            "merge_system_messages": coerce_merge_system_messages(
+                ep.get("merge_system_messages")
+            ),
+            "extra_payload": dict(ep.get("extra_payload") or {}),
+            "extra_headers": dict(ep.get("extra_headers") or {}),
             "is_default": False,
         }
         try:

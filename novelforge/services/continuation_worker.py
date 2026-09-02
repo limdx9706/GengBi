@@ -36,9 +36,13 @@ from novelforge.services.llm_client import (
     LLMError,
     RateLimitError,
     StreamResult,
+    coerce_merge_system_messages,
 )
 from novelforge.services.storage_service import _generate_id
-from novelforge.core.post_processor import post_process_content
+from novelforge.core.post_processor import (
+    extract_native_think_content,
+    post_process_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +188,7 @@ class ContinuationWorker(QThread):
         debug_mode: bool = False,
         extra_payload: dict | None = None,
         extra_headers: dict | None = None,
+        merge_system_messages: bool | str = False,
         proxy: str | None = None,
         prefer_non_stream: bool = False,
         parent=None,
@@ -212,6 +217,7 @@ class ContinuationWorker(QThread):
             debug_mode: 是否开启调试模式（开启后每次 LLM 调用前弹窗确认）
             extra_payload: 自定义请求体字段（deep merge 到 payload）
             extra_headers: 自定义 HTTP 头（update 到 headers）
+            merge_system_messages: 是否合并 system 消息（默认 False=不合并）
             proxy: HTTP/HTTPS 代理 URL（None 表示不走代理）
             prefer_non_stream: True 时走 chat_completion，完成后一次性推送全文
             parent: 父 QObject
@@ -225,6 +231,7 @@ class ContinuationWorker(QThread):
         # 自定义请求扩展（透传给 LLMClient）
         self.extra_payload: dict = extra_payload or {}
         self.extra_headers: dict = extra_headers or {}
+        self.merge_system_messages = coerce_merge_system_messages(merge_system_messages)
         # 网络代理（透传给 LLMClient）
         self.proxy = proxy
         # 全局非流式开关（默认 False=流式）
@@ -353,6 +360,11 @@ class ContinuationWorker(QThread):
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
                 extra_payload=self._debug_override_endpoint.get("extra_payload") or {},
                 extra_headers=self._debug_override_endpoint.get("extra_headers") or {},
+                merge_system_messages=coerce_merge_system_messages(
+                    self._debug_override_endpoint.get(
+                        "merge_system_messages", self.merge_system_messages
+                    )
+                ),
                 proxy=self.proxy,
             )
             if ep_id:
@@ -458,6 +470,7 @@ class ContinuationWorker(QThread):
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
                 extra_payload=self.extra_payload,
                 extra_headers=self.extra_headers,
+                merge_system_messages=self.merge_system_messages,
                 proxy=self.proxy,
             )
         client = self._effective_client()
@@ -483,7 +496,7 @@ class ContinuationWorker(QThread):
                 response = await client.chat_completion(**gen_kwargs)
                 msg = (response.get("choices") or [{}])[0].get("message") or {}
                 content = msg.get("content") or ""
-                reasoning = msg.get("reasoning_content") or ""
+                reasoning = LLMClient.extract_message_reasoning(msg)
                 if content:
                     content_parts.append(content)
                     char_count = len(content)
@@ -571,12 +584,19 @@ class ContinuationWorker(QThread):
         )
         generated_title = title_match.group(1).strip() if title_match else ""
 
+        # 回退：部分 Qwen/中转把思维链嵌在正文 <think> 内，无独立字段
+        if not result.reasoning_content and result.content:
+            result.reasoning_content = extract_native_think_content(result.content)
+
+        raw_content = result.content
+        apply_regex = bool(self.parameters.get("apply_regex", True))
         final_content = post_process_content(
             result.content,
             regex_engine=self.regex_engine,
             template_engine=self.template_engine,
             project_id=self.project_id,
             chapter_metadata=self.chapter_metadata,
+            apply_regex=apply_regex,
         )
 
         # 构建 Continuation 对象
@@ -584,6 +604,7 @@ class ContinuationWorker(QThread):
             id=_generate_id("sw_"),
             created_at=datetime.now(),
             content=final_content,
+            raw_content=raw_content,
             model=self._effective_model(),
             is_accepted=False,
             parent_id=self.parent_continuation_id,
