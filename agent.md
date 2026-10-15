@@ -19,6 +19,7 @@
 
 ```
 novelforge/
+├── cli.py           # argparse 命令行入口（continue/endpoints/presets），UTF-8 管道与退出码；cli_main.py 为独立控制台打包入口
 ├── models/          # 数据模型（pydantic v2）
 │   ├── chapter.py        # Chapter、Continuation（raw_content 后处理前原文；reasoning_content API 推理；accept=promote_continuation_to_chapter 提升为新章节插入当前章之后；Continuation.generated_title LLM 生成标题从 <novelforge_title> 标签提取；Continuation.highlights 输出栏高亮持久化；Chapter.protagonist_profile 主角形象档案持久化；Chapter.custom_characters 自定义角色档案 dict[str, ProtagonistProfile] 持久化，按角色名键每章可存多个；protagonist.py 的 ProtagonistProfile.copied_from 记录复制来源章节 index，None=原章提取、非 None=复制自第N章，用于主角/自定义角色形象「复制到章节」功能 source 描述）
 │   ├── context.py        # ContextEntry（条目级 enabled 开关控制注入；copied_from 字段记录复制来源章节 index 用于「复制到章节」功能 source 描述）、VALID_CATEGORIES/POSITIONS/ROLES
@@ -389,6 +390,17 @@ novelforge/
 - **MainWindow 接线**：面板 3 个增量信号连接 3 个 handler；先异步/同步查基准，无基准 emit `_incremental_no_base`（`QMessageBox.information` 提示「未找到更早章节的XX提取结果，未执行提取」）并 return，有基准 emit `_extract_mode_msg`（状态栏「基于第N章提取结果增量更新」）并带增量参数调 `extract_streaming`/`extract_protagonist_streaming`/`extract_custom_character_streaming`，回调复用既有 `_extract_done`/`_protagonist_done`/`_custom_character_done`
 - **UI 入口**：上下文/主角形象/自定义角色功能按钮的 `_FeatureActionDialog` 动作列表含「增量更新」项，选中即发射对应增量信号
 - **测试覆盖**：`tests/test_incremental_context_extraction.py`（10 用例：find_latest_context_base 命中/未命中/空条目跳过/排除当前章、_build_incremental_prompt 占位符/覆盖/无 project、增量 delta 章节与缓存元数据、当前章不晚于基准、多批合并）+ `tests/test_incremental_protagonist_extraction.py`（7 用例）+ `tests/test_incremental_custom_character_extraction.py`（8 用例）+ `tests/test_context_preview_panel_layout.py`（25 用例：6 功能按钮/对话框动作键/动作分发信号/按钮统一禁用恢复）
+
+### 26. 无界面文本续写 CLI
+
+- `novelforge/services/headless.py` 复用 `TxtImporter.split_text`、PromptAssembler、TemplateEngine、RegexEngine、LLMClient 与 post_process_content；不依赖 Qt、不修改桌面项目数据库。
+- `continue` 支持 TXT/标准输入、桌面默认端点或环境变量、预设选择、采样参数、提示词预览与文件输出；`endpoints`/`presets` 提供可脚本化 JSON 清单。API 密钥仅从环境变量或桌面加密配置读取。
+- 参数优先级：显式参数 > 连接环境变量 > 保存的续写配置/预设。显式自定义 URL 不继承旧端点密钥、HTTP 头、请求扩展。
+- 预设与变量渲染位于一次性临时目录；PromptAssembler 优先复用已注入 TemplateEngine 的 variable_store，避免越过调用者指定的存储位置。
+- HTML 特征检测归入 `core/post_processor.py`；ContinuationWorker 保留 `_contains_html` 导入别名，解除核心模块反向依赖 Qt 的循环导入。
+- CLI 在完整生成并清理正文后提交输出，拒绝覆盖输入，默认不覆盖已有输出；不完整响应、失败与取消不提交文件。返回码 0/1/2/130 分别表示成功/运行失败/输入错误/用户中断。
+- `requirements-cli.txt` 包含非 Qt 依赖；`requirements.txt` 引用它并保留 PySide6。`build --cli` 生成 `GengBi_CLI_v{版本号}` 控制台程序，显式排除 Qt；默认 GUI 构建不变。
+- Windows CI 使用本机 HTTP/SSE 测试服务对源码和打包产物执行同一套 `tests/test_cli.py`，不依赖模型账号；macOS 实机验证未执行。
 
 ## 代码风格规范
 
