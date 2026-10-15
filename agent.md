@@ -484,3 +484,5 @@ novelforge/
 ## CLI 失败语义
 
 统一出口为 cli_diagnostics，日志处理器仅记录结构，不格式化原始模型/异常消息。core.runtime_mode.strict_cli 使用 ContextVar 在 CLI 请求中开启严格响应与资源检查，桌面端默认保持兼容行为。模型返回截断、过滤、拒答、空内容、错误结构或无正常结束标记时不得当作成功产物。资源损坏不可当作空列表继续覆盖。清理和失败状态写盘使用 preserve_failure 保留主异常。修改错误处理必须覆盖本机 HTTP/SSE 与失败后文件/状态行为，不能仅检查错误文字。
+
+服务商错误须经 provider_details 提取并脱敏 message/code/type/param/status 与请求 ID，不可因禁止输出完整响应体而丢弃具体原因；请求匹配材料只用于内存脱敏，严禁写入诊断。

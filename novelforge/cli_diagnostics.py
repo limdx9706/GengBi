@@ -88,6 +88,7 @@ def reset_operation(args: argparse.Namespace) -> None:
         _active.args = args
         _active.observed = None
         _active.events.clear()
+        _active.request_fragments.clear()
         _active.context.clear()
         _active.phase = "初始化"
 
@@ -183,10 +184,127 @@ def _stack(error: BaseException) -> list[dict[str, Any]]:
     ]
 
 
+def capture_request(payload: dict, headers: dict) -> None:
+    """只在内存保留脱敏匹配材料，不将请求写入诊断。"""
+    if not _active:
+        return
+    _active.request_fragments.clear()
+    for value in headers.values():
+        register_secret(str(value))
+        if str(value).lower().startswith("bearer "):
+            register_secret(str(value)[7:])
+
+    def visit(value):
+        if isinstance(value, str):
+            normalized = " ".join(value.split())
+            if len(normalized) < 12:
+                register_secret(normalized)
+            else:
+                _active.request_fragments.update(
+                    normalized[i : i + 12] for i in range(len(normalized) - 11)
+                )
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                visit(item)
+
+    for message in payload.get("messages", []):
+        if isinstance(message, dict):
+            visit(message.get("content"))
+            visit(message.get("tool_calls", []))
+
+    def credentials(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key).lower() in {
+                    "api_key",
+                    "apikey",
+                    "key",
+                    "token",
+                    "access_token",
+                    "authorization",
+                    "password",
+                } and isinstance(item, str):
+                    register_secret(item)
+                else:
+                    credentials(item)
+        elif isinstance(value, list):
+            for item in value:
+                credentials(item)
+
+    credentials(payload)
+
+
+def provider_text(value: str) -> str:
+    text = " ".join(value[:8000].split())
+    if _active and _active.request_fragments:
+        hidden = [False] * len(text)
+        for i in range(max(0, len(text) - 11)):
+            if text[i : i + 12] in _active.request_fragments:
+                hidden[i : i + 12] = [True] * 12
+        text = "".join("\x00" if hidden[i] else c for i, c in enumerate(text))
+        text = re.sub(r"\x00+", "[REQUEST REDACTED]", text)
+    text = re.sub(r"(?i)\b(?:private|secret)[-_][\w-]+", "[REDACTED]", text)
+    text = re.sub(
+        r"(?i)([?&](?:key|api_key|token|access_token)=)[^&\s]+", r"\1[REDACTED]", text
+    )
+    return clean(text)[:800]
+
+
+def provider_details(error: BaseException) -> dict[str, Any]:
+    """公开错误信封中的指定字段；未知字段和完整响应体不输出。"""
+    result = {}
+    body = getattr(error, "body", "")
+    try:
+        envelope = json.loads(body) if body else {}
+    except (ValueError, TypeError):
+        envelope = None
+    if isinstance(envelope, dict):
+        item = envelope.get("error", envelope)
+        if "error" not in envelope and not envelope.get("message"):
+            item = {
+                **envelope,
+                "message": envelope.get("detail") or envelope.get("error_description"),
+            }
+        if isinstance(item, str):
+            result["provider_message"] = provider_text(item)
+        elif isinstance(item, dict):
+            for field in ("message", "code", "type", "param", "status"):
+                value = item.get(field)
+                if isinstance(value, (str, int)) and not isinstance(value, bool):
+                    result["provider_" + field] = provider_text(str(value))
+        for source in (envelope, item):
+            if not isinstance(source, dict):
+                continue
+            for field in ("request_id", "requestId", "trace_id"):
+                if isinstance(source.get(field), str):
+                    result["request_id"] = provider_text(source[field])
+                    break
+    elif body:
+        # HTML/纯文本网关错误仍有可用原因；去掉脚本、标记和长正文。
+        text = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1>", "", body[:8000])
+        text = re.sub(r"<[^>]+>", " ", text)
+        result["provider_message"] = provider_text(text)
+    headers = getattr(error, "response_headers", {})
+    for field in ("x-request-id", "request-id", "x-trace-id", "traceparent", "cf-ray"):
+        value = next((v for k, v in headers.items() if k.lower() == field), None)
+        if value:
+            result["request_id"] = provider_text(str(value))
+            break
+    if not result.get("provider_message"):
+        result["provider_message_unavailable"] = (
+            "服务未返回可识别的错误说明；请凭请求 ID 向服务商查询。"
+        )
+    return result
+
+
 def _api_failure(error: BaseException) -> Failure:
     status = getattr(error, "status", None)
     details = {"http_status": status} if isinstance(status, int) else {}
-    # 原始服务错误只参与分类，不作为终端/诊断内容。
+    details.update(provider_details(error))
+    # 原始响应只用于分类，公开字段由 provider_details 脱敏。
     body = str(getattr(error, "body", "") or str(error)).lower()
     category = "api_error"
     hint = "检查 API 根地址、模型 ID 与服务商状态。"
@@ -228,7 +346,7 @@ def _api_failure(error: BaseException) -> Failure:
         hint = "服务商或上游服务异常；稍后再试并检查服务状态。"
     return Failure(
         category,
-        f"API 请求失败（HTTP {status}）。" if status else "API 请求失败。",
+        "服务在 HTTP 200 响应中返回了错误。" if status == 200 else f"API 请求失败（HTTP {status}）。" if status else "API 请求失败。",
         hint,
         details=details,
     )
@@ -280,11 +398,11 @@ def describe(error: BaseException, seen: set[int] | None = None) -> Failure:
             "authentication",
             "API 认证失败（HTTP 401）。",
             "检查对应端点的密钥是否有效，不要把密钥粘贴到诊断记录。",
-            details={"http_status": 401},
+            details={"http_status": 401, **provider_details(error)},
         )
     if name == "RateLimitError":
         retry = getattr(error, "retry_after", None)
-        details = {"http_status": 429}
+        details = {"http_status": 429, **provider_details(error)}
         if isinstance(retry, (int, float)) and math.isfinite(retry):
             details["retry_after_seconds"] = retry
         return Failure(
@@ -510,6 +628,7 @@ class Diagnostics(logging.Handler):
         self.phase = "参数解析"
         self.context: dict[str, str] = {}
         self.secrets: set[str] = set()
+        self.request_fragments: set[str] = set()
         self.observed: BaseException | None = None
         self.events: list[dict[str, Any]] = []
         self.previous_level = logging.getLogger("novelforge").level
@@ -592,7 +711,9 @@ class Diagnostics(logging.Handler):
         visited = {id(error)}
         while cause is not None and id(cause) not in visited and len(chain) < 8:
             visited.add(id(cause))
-            chain.append({"exception_type": type(cause).__name__, "frames": _stack(cause)})
+            chain.append(
+                {"exception_type": type(cause).__name__, "frames": _stack(cause)}
+            )
             cause = cause.__cause__ or cause.__context__
         if chain:
             report["cause_chain"] = chain

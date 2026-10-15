@@ -262,7 +262,7 @@ gengbi extract worldbook --project PROJECT_ID --jailbreak off --debug
 gengbi config test --error-format json --diagnostics-dir ".\diagnostics"
 ```
 
-默认诊断保存在配置文件所在目录的 `logs/cli-errors` 下；没有指定配置时通常是 `%USERPROFILE%\.novelforge\logs\cli-errors`。每次错误有独立 ID，诊断包含异常因果链、代码位置、HTTP 状态和可识别的服务商错误类别，不保存 API Key、请求正文、响应正文、局部变量或完整命令行。原始服务端错误体只用于分类。无法明确分类时会报告通用 API/内部错误，不把猜测当作原因。
+默认诊断保存在配置文件所在目录的 `logs/cli-errors` 下；没有指定配置时通常是 `%USERPROFILE%\.novelforge\logs\cli-errors`。每次错误有独立 ID，诊断包含异常因果链、代码位置、HTTP 状态和可识别的服务商错误类别，不保存 API Key、请求正文、响应正文、局部变量或完整命令行。服务端错误信封中的 `message/code/type/param/status` 会经脱敏后显示在详情中，并保留可用的请求 ID。非 JSON 网关错误会提取有长度限制的文本摘要；密钥、认证头和匹配到的请求文本回显会遮蔽。完整错误响应及其他未知字段不写入诊断。服务未提供可识别说明时，会明确标注 `provider_message_unavailable`。无法明确分类时会报告通用 API/内部错误，不把猜测当作原因。
 
 | 错误代码 | 含义与处理 |
 | --- | --- |

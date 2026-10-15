@@ -60,10 +60,11 @@ def api():
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            self.send_response(200)
+            self.send_response(state.get("get_status", 200))
             self.send_header("Content-Type", "application/json")
+            self.send_header("X-Request-ID", "req-local-test-123")
             self.end_headers()
-            self.wfile.write(b'{"data":[{"id":"test-model"}]}')
+            self.wfile.write(state.get("get_body", '{"data":[{"id":"test-model"}]}').encode())
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -74,6 +75,7 @@ def api():
                 else state["content"]
             )
             self.send_response(state["status"])
+            self.send_header("X-Request-ID", "req-local-test-123")
             if state["status"] == 429:
                 self.send_header("Retry-After", "0")
             self.send_header(
@@ -1978,3 +1980,44 @@ def test_protected_preset_toggle_reports_failure(cli):
     assert result.returncode == 2 and "内置保护" in result.stderr
     value = cli("preset", "show", "default", "--config", cli.config)
     assert value.returncode == 0 and json.loads(value.stdout)["enabled"] is True
+
+
+@pytest.mark.parametrize("mode", ["stream", "nonstream", "sse", "models", "auth", "rate", "text", "extract", "error200"])
+def test_provider_reason_survives_all_api_paths(cli, api, mode):
+    secret = "custom-opaque-credential-987654321"
+    message = "Parameter stream is not supported for this route. " + secret + " " + STORY
+    error_body = json.dumps({"error": {"message": message, "code": "unsupported_parameter", "type": "invalid_request_error", "param": "stream"}})
+    api.update(status=400, error_body=error_body)
+    if mode == "sse":
+        api.update(status=200, raw="data: " + error_body + "\n\n")
+    elif mode == "error200":
+        api.update(status=200, raw=error_body)
+    elif mode == "auth":
+        api["status"] = 401
+    elif mode == "rate":
+        api["status"] = 429
+    elif mode == "text":
+        api["error_body"] = "<html><body>Upstream route rejected stream " + secret + " " + STORY + "</body></html>"
+    if mode in {"models", "extract"}:
+        setup = cli("config", "setup", "--config", cli.config, "--base-url", api["url"], "--model", "test", extra_env={"GENGBI_API_KEY": secret})
+        assert setup.returncode == 0
+        if mode == "models":
+            api.update(get_status=400, get_body=json.dumps({"error": {"message": "Unknown model catalog " + secret, "code": "catalog_unavailable"}}))
+            result = cli("config", "models", "--config", cli.config, "--error-format", "json")
+        else:
+            result = cli("extract", "worldbook", "-i", cli.story, "--config", cli.config, "--error-format", "json")
+    else:
+        result = cli("continue", "-i", cli.story, "--config", cli.config,
+                     "--base-url", api["url"], "--model", "test",
+                     "--no-stream" if mode in {"nonstream", "error200"} else "--stream",
+                     "--error-format", "json", extra_env={"GENGBI_API_KEY": secret})
+    assert result.returncode == 1, result.stderr
+    error = json.loads(result.stderr.splitlines()[-1])["error"]
+    details = error["details"]
+    assert details["request_id"] == "req-local-test-123"
+    assert ("Unknown model catalog" if mode == "models" else "Upstream route rejected stream" if mode == "text" else "Parameter stream is not supported") in details["provider_message"]
+    if mode != "text":
+        assert details["provider_code"] == ("catalog_unavailable" if mode == "models" else "unsupported_parameter")
+    saved = Path(error["diagnostic_file"]).read_text(encoding="utf-8")
+    assert secret not in result.stderr + saved
+    assert "旧信被锁在抽屉里" not in result.stderr + saved

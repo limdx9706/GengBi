@@ -61,6 +61,11 @@ class LLMError(Exception):
 class AuthError(LLMError):
     """API 认证失败（401），不重试，需跳转设置。"""
 
+    def __init__(self, message: str, body: str = "", headers=None):
+        super().__init__(message)
+        self.body = body
+        self.response_headers = dict(headers or {})
+
 
 class ResponseError(LLMError):
     """模型响应的结构化失败，不携带模型正文。"""
@@ -74,18 +79,21 @@ class ResponseError(LLMError):
 class RateLimitError(LLMError):
     """API 限流（429），含 Retry-After 秒数。"""
 
-    def __init__(self, message: str, retry_after: float) -> None:
+    def __init__(self, message: str, retry_after: float, body: str = "", headers=None) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+        self.body = body
+        self.response_headers = dict(headers or {})
 
 
 class APIError(LLMError):
     """API 返回错误状态码（非 401/429）。"""
 
-    def __init__(self, status: int, message: str, body: str = "") -> None:
+    def __init__(self, status: int, message: str, body: str = "", headers=None) -> None:
         super().__init__(message)
         self.status = status
         self.body = body
+        self.response_headers = dict(headers or {})
 
 
 @dataclass
@@ -659,6 +667,9 @@ class LLMClient:
         if self.extra_headers:
             headers.update(self.extra_headers)
 
+        if strict_responses.get():
+            from novelforge.cli_diagnostics import capture_request
+            capture_request(payload, headers)
         retry_count = 0
         last_error: Exception | None = None
 
@@ -677,7 +688,7 @@ class LLMClient:
                     if response.status == 401:
                         body = await response.text()
                         logger.error("API 认证失败 (401): %s", body[:200])
-                        raise AuthError("API Key 无效，请检查设置")
+                        raise AuthError("API Key 无效，请检查设置", body)
 
                     if response.status == 429:
                         body = await response.text()
@@ -696,7 +707,7 @@ class LLMClient:
                             continue
                         raise RateLimitError(
                             f"API 限流，已重试 {self.MAX_RETRIES} 次",
-                            retry_after,
+                            retry_after, body,
                         )
 
                     if response.status >= 400:
@@ -723,7 +734,8 @@ class LLMClient:
                         raise ResponseError("incomplete_response")
                     return
 
-            except (AuthError, RateLimitError, APIError):
+            except (AuthError, RateLimitError, APIError) as error:
+                error.response_headers = dict(response.headers)
                 raise
             except asyncio.CancelledError:
                 logger.info("流式调用被取消")
@@ -1059,6 +1071,9 @@ class LLMClient:
         if self.extra_headers:
             headers.update(self.extra_headers)
 
+        if strict_responses.get():
+            from novelforge.cli_diagnostics import capture_request
+            capture_request(payload, headers)
         retry_count = 0
         last_error: Exception | None = None
 
@@ -1081,7 +1096,7 @@ class LLMClient:
                     if response.status == 401:
                         body = await response.text()
                         logger.error("API 认证失败 (401): %s", body[:200])
-                        raise AuthError("API Key 无效，请检查设置")
+                        raise AuthError("API Key 无效，请检查设置", body)
 
                     if response.status == 429:
                         body = await response.text()
@@ -1100,7 +1115,7 @@ class LLMClient:
                             continue
                         raise RateLimitError(
                             f"API 限流，已重试 {self.MAX_RETRIES} 次",
-                            retry_after,
+                            retry_after, body,
                         )
 
                     if response.status >= 400:
@@ -1137,7 +1152,8 @@ class LLMClient:
                     )
                     return data
 
-            except (AuthError, RateLimitError, APIError):
+            except (AuthError, RateLimitError, APIError) as error:
+                error.response_headers = dict(response.headers)
                 raise
             except asyncio.CancelledError:
                 logger.info("非流式调用被取消")
@@ -1254,6 +1270,9 @@ class LLMClient:
         if self.extra_headers:
             headers.update(self.extra_headers)
 
+        if strict_responses.get():
+            from novelforge.cli_diagnostics import capture_request
+            capture_request({}, headers)
         try:
             session = await self._get_session()
             async with session.get(
@@ -1263,10 +1282,10 @@ class LLMClient:
                 if response.status >= 400:
                     body = await response.text()
                     if response.status == 401:
-                        raise AuthError("API 认证失败")
+                        raise AuthError("API 认证失败", body, response.headers)
                     if response.status == 429:
-                        raise RateLimitError("API 限流", retry_delay(response.headers.get("Retry-After")))
-                    raise APIError(response.status, self._parse_error_body(body), body)
+                        raise RateLimitError("API 限流", retry_delay(response.headers.get("Retry-After")), body, response.headers)
+                    raise APIError(response.status, self._parse_error_body(body), body, response.headers)
                 data = await response.json()
                 if not isinstance(data, dict) or not isinstance(data.get("data"), list):
                     raise ResponseError("response_schema")

@@ -155,3 +155,48 @@ def test_context_cache_write_failure_is_not_silently_successful(tmp_path):
             asyncio.run(extractor.save_edited_entries("proj_test", "chap_test", []))
     finally:
         strict_cli.reset(token)
+
+
+@pytest.mark.parametrize(
+    "body", ["", "{}", '{"error":{"details":{"unknown":"do-not-dump"}}}']
+)
+def test_missing_provider_reason_is_explicit(body):
+    failure = describe(APIError(400, "internal fallback", body))
+    assert "provider_message_unavailable" in failure.details
+    assert "do-not-dump" not in repr(failure)
+
+
+def test_provider_message_preserves_reason_but_redacts_echoes():
+    from novelforge.cli_diagnostics import capture_request
+
+    diagnostics = Diagnostics()
+    diagnostics.start()
+    try:
+        article = (
+            "The original confidential article has a very distinctive long sentence."
+        )
+        capture_request(
+            {"messages": [{"role": "user", "content": article}]},
+            {"Authorization": "Bearer opaque-credential"},
+        )
+        error = APIError(
+            400,
+            "unused",
+            json.dumps(
+                {
+                    "error": {
+                        "message": "Unsupported role: "
+                        + article[8:52]
+                        + " token=opaque-credential",
+                        "param": "messages[0].role",
+                    }
+                }
+            ),
+        )
+        result = describe(error)
+        assert "Unsupported role:" in result.details["provider_message"]
+        assert "confidential article" not in repr(result)
+        assert "opaque-credential" not in repr(result)
+        assert result.details["provider_param"] == "messages[0].role"
+    finally:
+        diagnostics.close()
