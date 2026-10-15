@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from novelforge.cli_diagnostics import operation_failed, phase
 from novelforge.cli_projects import (
     load_project_chapters,
     on_storage_loop,
@@ -134,6 +135,9 @@ def operation_config(config: Any, flow: str, args: argparse.Namespace):
         raise ValueError(
             "此流程未配置端点或模型，请运行 config setup 或 config set-flow"
         )
+    from novelforge.cli_diagnostics import register_secret
+    register_secret(connection.api_key)
+    phase("读取配置与输入", model=connection.model, endpoint=args.endpoint or "默认流程端点")
     identifier = "cli-operation"
     endpoint = {
         "id": identifier,
@@ -175,7 +179,6 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
     from novelforge.models.worldbook import WorldBook
     from novelforge.services.context_extractor import ContextExtractor
     from novelforge.services.importer import DEFAULT_CHAPTER_PATTERN, TxtImporter
-    from novelforge.services.llm_client import LLMError
     from novelforge.services.worldbook_service import WorldBookService
     from novelforge.utils.ids import generate_id
 
@@ -239,6 +242,7 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                 *[storage.get_chapter_file_path(project.id, c.id) for c in chapters],
             )
         extractor = ContextExtractor(storage, runtime)
+        phase("提取请求与响应解析", project=project.id, chapter=current.id)
         jailbreak = flow_jailbreak(runtime, EXTRACT_FLOWS[args.kind], args.jailbreak)
         base = None
         if args.incremental:
@@ -284,7 +288,8 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                 ),
             )
             if result.status != "completed" or not result.entries:
-                raise LLMError("提取未完成或没有有效条目")
+                raise operation_failed("上下文/世界书提取失败。", result.error or "没有有效条目")
+            phase("保存提取结果", project=project.id, chapter=current.id)
             await on_storage_loop(
                 storage,
                 extractor.save_edited_entries(project.id, current.id, result.entries),
@@ -385,7 +390,7 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                     ),
                 )
             if value is None or "保存失败" in message or "持久化失败" in message:
-                raise LLMError("提取或保存没有正常完成")
+                raise operation_failed(f"{args.kind} 提取或保存失败。", message)
             data = value.model_dump(mode="json")
             info = {
                 "project": project.id,
@@ -395,6 +400,7 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                 "degraded": "降级" in message,
             }
         if args.output:
+            phase("导出提取结果", project=project.id, chapter=current.id)
             if args.kind == "worldbook":
                 with TemporaryDirectory(prefix="gengbi-worldbook-") as directory:
                     temporary = Path(directory) / "export.json"

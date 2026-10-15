@@ -178,12 +178,14 @@ def execute(args: argparse.Namespace, config: Any) -> None:
                 emit({"text": output, "matches": matches})
                 return
             if action == "delete":
-                service.delete_script(args.id, **scope)
+                if not service.delete_script(args.id, **scope):
+                    raise ValueError("正则脚本删除失败或已不存在")
                 emit({"deleted": args.id})
                 return
             if action == "toggle":
                 value.disabled = args.state == "off"
-                service.update_script(value, **scope)
+                if not service.update_script(value, **scope):
+                    raise ValueError("正则脚本更新失败或已不存在")
         emit(value.model_dump(mode="json", by_alias=True))
         return
 
@@ -274,7 +276,8 @@ def execute(args: argparse.Namespace, config: Any) -> None:
             emit({"deleted": args.id})
             return
         if action == "toggle":
-            service.set_preset_enabled(args.id, args.state == "on")
+            if not service.set_preset_enabled(args.id, args.state == "on"):
+                raise ValueError("预设受内置保护或不存在，无法更改启用状态")
             value = load(args.id)
         elif action == "prompt-toggle":
             require(

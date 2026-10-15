@@ -133,7 +133,6 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
         prepare_continuation,
         resolve_connection,
     )
-    from novelforge.services.llm_client import LLMError
 
     if args.lookback < 0:
         raise ValueError("回溯章节数不能为负数")
@@ -213,6 +212,8 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                     indent=2,
                 )
             elif args.command == "audit":
+                from novelforge.cli_diagnostics import phase
+                phase("审稿模型请求", model=connection.model)
                 client = connection.client()
                 try:
                     result, finish = await client.complete_text(
@@ -225,9 +226,12 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                         else not config.is_prefer_non_stream(),
                     )
                 finally:
-                    await client.close()
-                if finish != "stop" or not result.strip():
-                    raise LLMError("审稿结果没有完整返回")
+                    from novelforge.cli_diagnostics import preserve_failure
+                    with preserve_failure():
+                        await client.close()
+                from novelforge.cli_diagnostics import require_model_text
+
+                require_model_text(result, finish, "审稿结果")
             else:
                 prepared.assembled.messages[:] = messages
                 result = await prepared.generate(

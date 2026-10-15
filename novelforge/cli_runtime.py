@@ -88,7 +88,8 @@ def review_text(text: str, path: Path) -> str:
                     return replacement
                 print("替换文件为空。", file=sys.stderr)
             except (OSError, UnicodeError) as error:
-                print(f"无法读取替换文件：{error}", file=sys.stderr)
+                from novelforge.cli_diagnostics import report_error
+                report_error(error)
         else:
             print("输入无效，尚未接受阶段产物。", file=sys.stderr)
 
@@ -155,7 +156,8 @@ def connect_checkpoints(
                     )
                     return
                 except (ValueError, OSError) as error:
-                    print(f"无法使用编辑结果：{error}", file=sys.stderr)
+                    from novelforge.cli_diagnostics import report_error
+                    report_error(error)
                     continue
             print("输入无效，仍停留在当前阶段。", file=sys.stderr)
 

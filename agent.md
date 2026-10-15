@@ -10,7 +10,7 @@
 - `extract worldbook -i TXT` 自动导入项目、提取章节上下文、保存原生世界书并可导出 ST JSON；返回 project/chapter/worldbook ID。`guide extract` 说明校对、选用、续写及接受候选的完整路径；世界书创建后不自动改变默认选择。
 - `headless.prepare_continuation` 支持真实项目章节、世界书、角色/世界观/文风/约束与回溯资料。项目续写可 `--save` 保存候选，默认不替换正文。
 - `FLOW_DEFINITIONS` 移至无 Qt 的 `core.config`，桌面端和 CLI 共用。`VolumeLogic` 位于 `services/volume_engine.py`，桌面 `VolumeOrchestrator` 保留 QThread/Signal 外壳；CLI `VolumeEngine` 使用异步入口及普通事件。
-- 世界观提取通过 WorldBookService 落盘对应世界书，保留已有用户条目。全范围验收维护于 `CLI_PARITY.md`；Windows 源码 CLI 77 项通过，独立 EXE 73 项通过、4 项源码专用检查跳过。macOS 尚未实机验证，远端 CI 以 PR 页面为准。
+- 世界观提取通过 WorldBookService 落盘对应世界书，保留已有用户条目。全范围验收维护于 `CLI_PARITY.md`；Windows CLI/诊断 129 项通过，独立 EXE 109 项通过、4 项源码专用检查跳过。macOS 尚未实机验证，远端 CI 以 PR 页面为准。
 - 世界书持久化测试必须使用 `tmp_path` 真实目录，不能让 MagicMock 路径进入文件服务；复提时校验替换旧维度并保留手工条目及其启用状态。
 - `cli_flows` 提供声明式流程五类 agent 的执行、阶段产物编辑和恢复，正文始终保存候选。`input_from` 校验为已执行的更早阶段 ID，按 ID 取对应产物；流程定义随运行保存快照。`cli_runtime` 共用源资料指纹和卷引擎构造/暂停点，恢复校验项目档案与章节，非法暂停点回答不自动通过。
 - `cli_settings` 支持写作/提取/卷/代理设置、端点扩展、模型列表保存和复制、流程模型重置、流程自定义破限；端点扩展仅显示字段名，不输出请求头/载荷内容。参数校验失败不得写入配置。回溯开关省略时继承全局默认，可用 `--no-lookback-*` 明确关闭。
@@ -480,3 +480,7 @@ novelforge/
 8. **MainWindow 接线变更**（更新第 5 节规律 + 第 9 节调试验证）：
    - `start_flow` 信号入口、5 个 agent handler 分发逻辑、`accept_mode` 适配逻辑（`_on_accept_continuation`）变化
    - `FlowPluginManager` UI 变化（导入/导出/删除按钮、`plugin_changed` 信号）
+
+## CLI 失败语义
+
+统一出口为 cli_diagnostics，日志处理器仅记录结构，不格式化原始模型/异常消息。core.runtime_mode.strict_cli 使用 ContextVar 在 CLI 请求中开启严格响应与资源检查，桌面端默认保持兼容行为。模型返回截断、过滤、拒答、空内容、错误结构或无正常结束标记时不得当作成功产物。资源损坏不可当作空列表继续覆盖。清理和失败状态写盘使用 preserve_failure 保留主异常。修改错误处理必须覆盖本机 HTTP/SSE 与失败后文件/状态行为，不能仅检查错误文字。

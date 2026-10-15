@@ -539,6 +539,8 @@ async def run_config(args: argparse.Namespace, config: Any) -> None:
         )
         if not connection.base_url or (args.action == "test" and not connection.model):
             raise ValueError("尚未配置端点或模型，请先运行 config setup")
+        from novelforge.cli_diagnostics import phase
+        phase("模型连接检测", model=connection.model)
         client = connection.client()
         try:
             if args.action == "models":
@@ -566,7 +568,9 @@ async def run_config(args: argparse.Namespace, config: Any) -> None:
                     raise LLMError("测试响应未正常完成")
                 emit({"ok": True, "model": connection.model, "reply": content})
         finally:
-            await client.close()
+            from novelforge.cli_diagnostics import preserve_failure
+            with preserve_failure():
+                await client.close()
 
 
 def run_worldbooks(args: argparse.Namespace, config: Any) -> None:
@@ -627,7 +631,8 @@ def run_worldbooks(args: argparse.Namespace, config: Any) -> None:
             emit({"output": str(args.output)})
             return
         if action == "delete":
-            service.delete_worldbook(book.id)
+            if not service.delete_worldbook(book.id):
+                raise ValueError("世界书删除失败或已不存在")
             config.set_selected_worldbook_ids(
                 [x for x in config.get_selected_worldbook_ids() if x != book.id]
             )

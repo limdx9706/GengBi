@@ -153,7 +153,9 @@ def storage_session(config: Any):
     try:
         yield service
     finally:
-        service.shutdown()
+        from novelforge.cli_diagnostics import preserve_failure
+        with preserve_failure():
+            service.shutdown()
 
 
 def load_project_chapters(service: Any, project_id: str, chapter_id: str | None = None):
@@ -288,6 +290,8 @@ def save_candidate(
         extracted_context_snapshot=prepared.context_entries,
         generated_title=title.group(1).strip() if title else "",
     )
+    from novelforge.cli_diagnostics import phase
+    phase("保存候选")
     storage.save_continuation(version, context.current_chapter.id)
     history = HistoryService(storage)
     now = history.now_iso()

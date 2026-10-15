@@ -74,13 +74,18 @@ def api():
                 else state["content"]
             )
             self.send_response(state["status"])
+            if state["status"] == 429:
+                self.send_header("Retry-After", "0")
             self.send_header(
                 "Content-Type",
                 "text/event-stream" if body["stream"] else "application/json",
             )
             self.end_headers()
+            if "raw" in state:
+                self.wfile.write(state["raw"].encode("utf-8"))
+                return
             if state["status"] != 200:
-                self.wfile.write(b'{"error":{"message":"server echoed secret-key"}}')
+                self.wfile.write(state.get("error_body", '{"error":{"message":"server echoed secret-key"}}').encode())
             elif body["stream"]:
                 for char in response_content:
                     event = {"choices": [{"delta": {"content": char}}]}
@@ -1826,3 +1831,150 @@ def test_terminal_checkpoint_requires_valid_action(monkeypatch, tmp_path):
     with pytest.raises(KeyboardInterrupt):
         engine.checkpoint_reached.emit("before_audit", {"outline": "大纲"})
     assert len(approved) == 1
+
+
+@pytest.mark.parametrize(
+    "status,content,finish,code,requests",
+    [
+        (401, "", "stop", "authentication", 1),
+        (400, "", "stop", "api_error", 1),
+        (200, "private-response-text is not JSON", "stop", "response_json", 2),
+        (200, "", "stop", "empty_response", 1),
+        (200, '[{"content":"unfinished private-response-text"}', "length", "output_truncated", 1),
+        (200, "private-response-text", "content_filter", "provider_filtered", 1),
+    ],
+)
+def test_extraction_failure_has_safe_cause_and_retry_context(
+    cli, api, tmp_path, status, content, finish, code, requests
+):
+    setup = cli(
+        "config", "setup", "--config", cli.config, "--base-url", api["url"],
+        "--model", "test-model", extra_env={"GENGBI_API_KEY": "private-api-key-value"},
+    )
+    assert setup.returncode == 0, setup.stderr
+    api.update(status=status, content=content, finish=finish)
+    diagnostics = tmp_path / "诊断"
+    result = cli(
+        "extract", "worldbook", "-i", cli.story, "--config", cli.config,
+        "--no-stream", "--error-format", "json", "--diagnostics-dir", diagnostics,
+    )
+    assert result.returncode == 1, result.stderr
+    error = json.loads(result.stderr.splitlines()[-1])["error"]
+    assert error["code"] == code, error
+    assert error["phase"].startswith("提取")
+    assert error["context"]["project"].startswith("proj_")
+    assert error["context"]["batch"] == "1"
+    assert len(api["requests"]) == requests
+    saved = Path(error["diagnostic_file"]).read_text(encoding="utf-8")
+    for private in ("private-response-text", "private-api-key-value", "secret-key", STORY):
+        assert private not in result.stderr + saved
+    assert "Traceback" not in result.stderr
+    project = cli("projects", "show", error["context"]["project"], "--config", cli.config)
+    assert project.returncode == 0, project.stderr
+
+
+def test_json_error_for_invalid_arguments_and_diagnostic_write_failure(cli, tmp_path):
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("unchanged", encoding="utf-8")
+    result = cli(
+        "continue", "-i", cli.story, "--jailbreak", "bad-secret-choice",
+        "--error-format", "json", "--diagnostics-dir", blocked,
+    )
+    assert result.returncode == 2
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "usage"
+    assert "bad-secret-choice" not in result.stderr
+    assert error["diagnostic_write_error"] == "FileExistsError"
+    assert blocked.read_text(encoding="utf-8") == "unchanged"
+
+@pytest.mark.parametrize("kind", ["context", "worldbook", "protagonist", "character", "ontology", "style", "rule"])
+@pytest.mark.parametrize("stream", ["--stream", "--no-stream"])
+def test_all_extraction_types_reject_truncated_response(cli, api, tmp_path, kind, stream):
+    setup = cli("config", "setup", "--config", cli.config, "--base-url", api["url"],
+                "--model", "test", extra_env={"GENGBI_API_KEY": "test-key"})
+    assert setup.returncode == 0, setup.stderr
+    rule = tmp_path / "rule.txt"
+    rule.write_text("保持人物姓名一致", encoding="utf-8")
+    extra = ["--character", "配角"] if kind == "character" else ["--prompt-file", rule] if kind == "rule" else []
+    api.update(finish="length", content='{"incomplete": "private-text"}')
+    result = cli("extract", kind, "-i", cli.story, "--config", cli.config,
+                 "--error-format", "json", stream, *extra)
+    assert result.returncode == 1, result.stderr
+    error = json.loads(result.stderr.splitlines()[-1])["error"]
+    assert error["code"] == "output_truncated", error
+    assert error["context"]["project"] in error["retry"]
+    assert len(api["requests"]) == 1
+    assert "private-text" not in result.stderr
+
+
+@pytest.mark.parametrize("stream,raw,code", [
+    ("--stream", 'data: {broken private-data\n\n', "response_json"),
+    ("--stream", 'data: {"error":{"code":"insufficient_quota","message":"private-data"}}\n\n', "quota_exhausted"),
+    ("--stream", 'data: {"choices":[{"delta":{"content":"private-data"}}]}\n\n', "incomplete_response"),
+    ("--stream", 'data: {"choices":[{"delta":{"refusal":"private-data"}}]}\n\n', "provider_refusal"),
+    ("--no-stream", '{"choices":[]}', "response_schema"),
+    ("--no-stream", '[]', "response_schema"),
+    ("--no-stream", '{"choices":[{"message":{"refusal":"private-data"},"finish_reason":"stop"}]}', "provider_refusal"),
+])
+def test_protocol_failures_never_write_output(cli, api, tmp_path, stream, raw, code):
+    api["raw"] = raw
+    output = tmp_path / "result.txt"
+    output.write_text("原结果", encoding="utf-8")
+    result = cli("continue", "-i", cli.story, "--config", cli.config,
+                 "--base-url", api["url"], "--model", "test", stream,
+                 "-o", output, "--force", "--error-format", "json")
+    assert result.returncode == 1, result.stderr
+    error = json.loads(result.stderr.splitlines()[-1])["error"]
+    assert error["code"] == code
+    assert output.read_text(encoding="utf-8") == "原结果"
+    assert "private-data" not in result.stderr
+    assert len(api["requests"]) == 1
+
+
+@pytest.mark.parametrize("command,directory,filename,raw", [
+    ("worldbooks", "worldbooks", "broken.json", '{"private-source":'),
+    ("regex", "regex", "global.json", '{"wrong":"private-source"}'),
+])
+def test_corrupt_resources_fail_without_overwriting(cli, command, directory, filename, raw):
+    folder = cli.storage / directory
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / filename
+    path.write_text(raw, encoding="utf-8")
+    result = cli(command, "list", "--config", cli.config, "--error-format", "json")
+    assert result.returncode != 0, result.stdout
+    assert "private-source" not in result.stderr
+    assert path.read_text(encoding="utf-8") == raw
+
+
+@pytest.mark.parametrize("quota", [False, True])
+def test_rate_limit_and_quota_are_distinct(cli, api, quota):
+    api["status"] = 429
+    if quota:
+        api["error_body"] = '{"error":{"code":"insufficient_quota","message":"private-credit"}}'
+    result = cli("continue", "-i", cli.story, "--config", cli.config,
+                 "--base-url", api["url"], "--model", "test", "--no-stream", "--error-format", "json")
+    assert result.returncode == 1, result.stderr
+    error = json.loads(result.stderr.splitlines()[-1])["error"]
+    assert error["code"] == ("quota_exhausted" if quota else "rate_limited")
+    assert len(api["requests"]) == (1 if quota else 4)
+    assert "private-credit" not in result.stderr and "secret-key" not in result.stderr
+
+
+@pytest.mark.parametrize("command,data", [("worldbooks", {"entries": ["private-invalid"]}), ("preset", {"prompts": ["private-invalid"]}), ("regex", ["private-invalid"])])
+def test_invalid_resource_import_does_not_create_partial_result(cli, tmp_path, command, data):
+    before = cli(command, "list", "--config", cli.config)
+    assert before.returncode == 0, before.stderr
+    source = tmp_path / "invalid-import.json"
+    source.write_text(json.dumps(data), encoding="utf-8")
+    result = cli(command, "import", "-i", source, "--config", cli.config)
+    assert result.returncode == 2, result.stderr
+    assert "private-invalid" not in result.stderr
+    after = cli(command, "list", "--config", cli.config)
+    assert after.returncode == 0 and json.loads(after.stdout) == json.loads(before.stdout)
+
+
+def test_protected_preset_toggle_reports_failure(cli):
+    result = cli("preset", "toggle", "default", "off", "--config", cli.config)
+    assert result.returncode == 2 and "内置保护" in result.stderr
+    value = cli("preset", "show", "default", "--config", cli.config)
+    assert value.returncode == 0 and json.loads(value.stdout)["enabled"] is True

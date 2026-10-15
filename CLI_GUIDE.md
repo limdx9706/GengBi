@@ -252,3 +252,35 @@ gengbi flows export FLOW_ID -o 分享流程.json
 - 非交互终端：不要把输入管道接到 `wizard`；使用具体子命令，流程/整卷加 `--auto`。
 
 配置摘要不会输出密钥或原始 API 错误体。预览、备份、提取文件和历史可能包含你的文章内容，保存到自己希望使用的目录即可。
+
+## 错误诊断与恢复
+
+失败会显示错误代码、失败阶段、项目/章节/流程定位、可执行建议和诊断文件路径。`--debug` 补充异常类型与调用位置；`--error-format json` 输出机器可读诊断；`--diagnostics-dir 路径` 指定诊断目录。这些参数放在具体子命令后。
+
+```powershell
+gengbi extract worldbook --project PROJECT_ID --jailbreak off --debug
+gengbi config test --error-format json --diagnostics-dir ".\diagnostics"
+```
+
+默认诊断保存在配置文件所在目录的 `logs/cli-errors` 下；没有指定配置时通常是 `%USERPROFILE%\.novelforge\logs\cli-errors`。每次错误有独立 ID，诊断包含异常因果链、代码位置、HTTP 状态和可识别的服务商错误类别，不保存 API Key、请求正文、响应正文、局部变量或完整命令行。原始服务端错误体只用于分类。无法明确分类时会报告通用 API/内部错误，不把猜测当作原因。
+
+| 错误代码 | 含义与处理 |
+| --- | --- |
+| `usage` / `invalid_input` / `validation` | 参数或数据字段不合法；查对应 `--help` 和 fields |
+| `input_json` / `encoding` | 本地文件格式或编码错误；修复文件后重试 |
+| `file_missing` / `permission` / `disk_full` / `filesystem` / `database` | 本地路径、权限、空间或数据库问题 |
+| `authentication` / `rate_limited` / `quota_exhausted` | 分别是密钥认证、限流、余额或配额不足 |
+| `api_error` / `model_not_found` / `context_limit` / `output_limit_parameter` | HTTP 状态、模型、输入长度或输出参数不被服务接受 |
+| `connection` / `proxy` / `tls` / `timeout` | 网络、代理、证书或超时 |
+| `response_json` / `response_schema` / `response_validation` | 模型结构化输出无效 |
+| `empty_response` / `incomplete_response` / `output_truncated` | 无正文、未正常结束、达到输出上限；不会保存为成功候选 |
+| `provider_refusal` / `provider_filtered` | 服务明确拒答或返回过滤标记；不伪装成网络错误 |
+| `persistence_failed` / `internal` | 业务保存失败或程序异常；保留诊断文件排查 |
+
+输入导入成功后，提取失败也会保留项目 ID。使用 `--project` 重试，替换原来的 `-i`，并保留原调用的配置、角色/约束、范围和输出参数；不要重复导入。流程错误会给出 `flows resume RUN_ID` 或 `volume resume RUN_ID` 入口，已完成阶段保留。恢复状态或清理同时失败时，诊断的 `secondary_error` 与 `cleanup_failed` 会明确标记，此时应先核对运行记录再恢复。
+
+确定性的认证、接口和协议失败不会在提取层盲目重试。限流等待有上限；流式正文已经开始后遇到传输中断，不会重试并拼接两次输出。非关键恢复或降级成功时，退出码仍为 0，但会输出 `completed_with_warnings` 提示及诊断文件。
+
+退出码：`0` 成功，`1` 运行失败，`2` 参数/本地输入错误，`130` 用户中断。诊断文件写入失败不会覆盖最初原因。普通命令进度仍写 stderr，`--error-format json` 的最终记录为 `{"error": ...}`，成功但有提示为 `{"warning": ...}`；自动化程序应读取对应 JSON 记录，不应把全部 stderr 当作单个 JSON。
+
+旧版 CLI 没有保存足够的错误信息，不能仅凭旧的“模型请求未成功完成”还原失败原因；新版本在下一次失败时提供诊断。

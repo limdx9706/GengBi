@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import logging
 import math
 import os
 import sys
@@ -14,6 +13,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from novelforge import __version__
+from novelforge.cli_diagnostics import (
+    ArgumentParser,
+    Diagnostics,
+    phase,
+    reset_operation,
+)
 
 
 def _positive_timeout(value: str) -> float:
@@ -25,7 +30,7 @@ def _positive_timeout(value: str) -> float:
 
 def build_parser() -> argparse.ArgumentParser:
     """定义稳定的子命令与显式覆盖选项。"""
-    parser = argparse.ArgumentParser(
+    parser = ArgumentParser(
         prog="gengbi", description="赓笔：无需桌面窗口的文本续写"
     )
     parser.add_argument("--version", action="version", version=f"赓笔 {__version__}")
@@ -34,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--config", type=Path, help="桌面配置 JSON；默认读取 ~/.novelforge/config.json"
     )
+    common.add_argument("--error-format", choices=["text", "json"], default="text", help="错误输出格式，写入 stderr")
+    common.add_argument("--diagnostics-dir", type=Path, help="脱敏错误诊断保存目录")
+    common.add_argument("--debug", action="store_true", help="显示脱敏异常位置，不输出请求正文或密钥")
     from novelforge.cli_workspace import add_commands
 
     add_commands(subparsers, common)
@@ -199,6 +207,7 @@ def _write_output(text: str, output: Path | None, force: bool) -> None:
         sys.stdout.write(text)
         sys.stdout.flush()
         return
+    phase("写入输出文件")
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -212,11 +221,17 @@ def _write_output(text: str, output: Path | None, force: bool) -> None:
             os.link(temporary, output)
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            from novelforge.cli_diagnostics import preserve_failure
+            with preserve_failure():
+                temporary.unlink(missing_ok=True)
 
 
 async def _execute(args: argparse.Namespace) -> None:
     """编排输入输出；业务模块保持无 Qt 依赖。"""
+    reset_operation(args)
+    from novelforge.services.llm_client import strict_responses
+    strict_responses.set(True)
+    phase("读取配置与输入", project=getattr(args, "project", None), chapter=getattr(args, "chapter", None))
     if args.command not in {"continue", "endpoints", "presets"}:
         from novelforge.cli_workspace import execute
 
@@ -381,44 +396,39 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         show_guide()
         return 0
-    args = build_parser().parse_args(arguments)
-    # API 错误体可能回显密钥或正文；CLI 只输出受控错误，不透传底层日志。
-    logging.basicConfig(level=logging.CRITICAL)
+    # 参数解析失败也要使用统一出口；仅预读诊断选项，不记录原始 argv。
+    early = argparse.Namespace(error_format="text", diagnostics_dir=None, config=None, debug="--debug" in arguments)
+    for option, attribute in (("--error-format", "error_format"), ("--diagnostics-dir", "diagnostics_dir"), ("--config", "config")):
+        for item in arguments:
+            if item.startswith(option + "="):
+                setattr(early, attribute, item.split("=", 1)[1])
+        if option in arguments:
+            index = arguments.index(option)
+            if index + 1 < len(arguments) and not arguments[index + 1].startswith("--"):
+                setattr(early, attribute, arguments[index + 1])
+    diagnostics = Diagnostics(early)
+    diagnostics.start()
     try:
-        from novelforge.services.llm_client import APIError, AuthError, LLMError
-
+        args = build_parser().parse_args(arguments)
+        diagnostics.args = args
         asyncio.run(_execute(args))
+        if diagnostics.events:
+            from novelforge.cli_diagnostics import CLIProblem, Failure
+            diagnostics.report(CLIProblem(Failure(
+                "completed_with_warnings", "命令已完成，但过程中出现重试、恢复或降级提示。",
+                "检查诊断记录中的事件位置；如结果存在 degraded 标记，请复核提取结果。", 0,
+            )))
         return 0
-    except KeyboardInterrupt:
-        print("已取消当前任务。", file=sys.stderr)
-        return 130
     except BrokenPipeError:
         # 避免 Python 退出时再次刷新已关闭管道，导致退出码被改写为 120。
         if hasattr(sys.stdout, "fileno"):
             with open(os.devnull, "w") as sink:
                 os.dup2(sink.fileno(), sys.stdout.fileno())
         return 1
-    except ModuleNotFoundError:
-        print(
-            "错误: 缺少运行依赖，请安装 requirements-cli.txt 中的依赖。",
-            file=sys.stderr,
-        )
-        return 1
-    except TimeoutError:
-        print("错误: 模型请求超时。", file=sys.stderr)
-        return 1
-    except (ValueError, TypeError, LookupError, OSError) as error:
-        print(f"错误: {error}", file=sys.stderr)
-        return 2
-    except LLMError as error:
-        if isinstance(error, AuthError):
-            message = "API 认证失败，请检查密钥。"
-        elif isinstance(error, APIError):
-            message = f"API 请求失败（HTTP {error.status}）。"
-        else:
-            message = "模型请求未成功完成，请检查服务连接、模型和输出 Token 上限。"
-        print(f"错误: {message}", file=sys.stderr)
-        return 1
+    except (Exception, KeyboardInterrupt, asyncio.CancelledError) as error:  # noqa: BLE001 -- 最外层统一保存结构化诊断
+        return diagnostics.report(error)
+    finally:
+        diagnostics.close()
 
 
 if __name__ == "__main__":

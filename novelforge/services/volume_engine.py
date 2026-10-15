@@ -488,9 +488,11 @@ class VolumeLogic:
         except asyncio.CancelledError:
             logger.info("卷级任务被取消")
             raise
-        except AuthError:
+        except AuthError as e:
+            logger.error("卷级流程认证失败: %s", e)
             self.auth_error.emit()
         except (RateLimitError, APIError) as e:
+            logger.error("卷级流程接口失败: %s", e)
             self.error.emit(str(e))
         except Exception as e:
             logger.error("卷级流程异常: %s", e, exc_info=True)

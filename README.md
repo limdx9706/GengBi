@@ -499,3 +499,5 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 ## 免责声明
 
 赓笔是辅助续写工具，生成内容由你所配置的 LLM 服务商处理并返回。使用者应自行承担生成内容的使用与发布责任，并遵守所使用 LLM 服务商的服务条款与当地法律法规。本工具不存储、不审核、不对生成内容负责。
+
+CLI 错误现在包含类别、阶段、恢复入口及脱敏诊断路径；可加 `--debug`、`--error-format json`、`--diagnostics-dir`。详见 [错误诊断与恢复](CLI_GUIDE.md#错误诊断与恢复)；验收范围见 [CLI_ERROR_HANDLING.md](CLI_ERROR_HANDLING.md)。

@@ -482,6 +482,8 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                             }
                         )
                         return
+                    from novelforge.cli_diagnostics import phase as diagnostic_phase
+                    diagnostic_phase("流程阶段", project=context.project.id, run=state["id"], stage=stage.id)
                     state.update(status="running", stage=stage.id)
                     save()
                     print(
@@ -506,9 +508,12 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                                 stream=stream,
                             )
                         finally:
-                            await client.close()
-                        if finish != "stop" or not output.strip():
-                            raise LLMError("分析未完整生成")
+                            from novelforge.cli_diagnostics import preserve_failure
+                            with preserve_failure():
+                                await client.close()
+                        from novelforge.cli_diagnostics import require_model_text
+
+                        require_model_text(output, finish, "流程分析")
                         if not args.auto:
                             output = review_text(
                                 output, directory / f"{state['id']}-{stage.id}.txt"
@@ -637,10 +642,14 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
         except (KeyboardInterrupt, asyncio.CancelledError, EOFError):
             state["status"] = "interrupted"
             if not args.dry_run:
-                save()
+                from novelforge.cli_diagnostics import preserve_failure
+                with preserve_failure():
+                    save()
             raise KeyboardInterrupt from None
-        except (ValueError, TypeError, OSError, LLMError):
+        except Exception:
             state["status"] = "failed"
             if not args.dry_run:
-                save()
+                from novelforge.cli_diagnostics import preserve_failure
+                with preserve_failure():
+                    save()
             raise

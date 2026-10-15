@@ -301,6 +301,11 @@ class CustomAuditRuleService:
                         continue
                     return None, last_error
                 except (AuthError, RateLimitError, APIError, LLMError) as e:
+                    from novelforge.core.runtime_mode import strict_cli
+                    from novelforge.services.llm_client import ResponseError
+                    if strict_cli.get() and isinstance(e, (AuthError, RateLimitError, APIError, ResponseError)):
+                        logger.error("模型请求失败: %s", e)
+                        raise
                     last_error = f"LLM 调用失败: {e}"
                     logger.warning("自定义设定解析第 %d 次尝试 LLM 调用失败: %s", attempt + 1, e)
                     if attempt < len(temperatures) - 1:

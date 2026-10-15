@@ -21,7 +21,7 @@ from novelforge.models import WritingPreset
 from novelforge.models.preset import GLOBAL_CHARACTER_ID
 from novelforge.models.regex import RegexScript
 from novelforge.services.importer import DEFAULT_CHAPTER_PATTERN, TxtImporter
-from novelforge.services.llm_client import LLMClient, LLMError
+from novelforge.services.llm_client import LLMClient
 from novelforge.services.preset_service import PresetService
 from novelforge.utils.ids import validate_id
 from novelforge.utils.paths import (
@@ -70,6 +70,10 @@ class Connection:
 
     def client(self) -> LLMClient:
         """创建与桌面端行为一致的 API 客户端。"""
+        from novelforge.cli_diagnostics import register_secret
+        register_secret(self.api_key)
+        for value in self.extra_headers.values():
+            register_secret(value)
         return LLMClient(
             base_url=self.base_url,
             api_key=self.api_key,
@@ -238,6 +242,14 @@ class PreparedContinuation:
 
     async def generate(self, connection: Connection, *, stream: bool = True) -> str:
         """完整接收并处理正文；中断或不完整响应不作为成功结果返回。"""
+        from novelforge.cli_diagnostics import (
+            phase,
+            register_secret,
+            require_model_text,
+        )
+
+        register_secret(connection.api_key)
+        phase("模型生成", model=connection.model)
         client = connection.client()
         try:
             content, finish = await client.complete_text(
@@ -247,9 +259,10 @@ class PreparedContinuation:
                 **self.parameters,
             )
         finally:
-            await client.close()
-        if finish != "stop" or not isinstance(content, str):
-            raise LLMError("模型响应未正常完成，请调整输出上限或检查服务端")
+            from novelforge.cli_diagnostics import preserve_failure
+            with preserve_failure():
+                await client.close()
+        require_model_text(content, finish)
         self.raw_content = content
         result = post_process_content(
             content,
@@ -259,8 +272,7 @@ class PreparedContinuation:
             chapter_metadata=self.metadata,
             apply_regex=self.apply_regex,
         ).strip()
-        if not result:
-            raise LLMError("模型没有返回可用正文")
+        require_model_text(result, finish, "后处理正文")
         return result
 
 
@@ -456,4 +468,6 @@ def prepare_continuation(
                 context_entries=entries,
             )
         finally:
-            template_engine.shutdown()
+            from novelforge.cli_diagnostics import preserve_failure
+            with preserve_failure():
+                template_engine.shutdown()

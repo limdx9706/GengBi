@@ -28,7 +28,6 @@ async def execute(args: argparse.Namespace) -> None:
     from novelforge.cli import _execute, build_parser
     from novelforge.cli_projects import storage_session
     from novelforge.services.headless import read_config
-    from novelforge.services.llm_client import LLMError
 
     if not sys.stdin.isatty():
         raise ValueError("wizard 需要交互终端；脚本请使用 guide extract 或具体子命令")
@@ -37,6 +36,12 @@ async def execute(args: argparse.Namespace) -> None:
     async def run(command: list[str]) -> None:
         if args.config:
             command += ["--config", str(args.config)]
+        for option in ("error_format", "diagnostics_dir"):
+            value = getattr(args, option, None)
+            if value:
+                command += ["--" + option.replace("_", "-"), str(value)]
+        if getattr(args, "debug", False):
+            command.append("--debug")
         await _execute(parser.parse_args(command))
 
     def select_project() -> str:
@@ -192,10 +197,8 @@ async def execute(args: argparse.Namespace) -> None:
         except EOFError:
             print("\n已退出向导。")
             return
-        except LLMError:
-            print(
-                "模型请求未完成，请检查端点、模型和输出上限。已保存的项目仍可继续使用。",
-                file=sys.stderr,
-            )
-        except (ValueError, TypeError, LookupError, OSError) as error:
-            print(f"错误：{error}。返回任务菜单。", file=sys.stderr)
+        except Exception as error:  # noqa: BLE001 -- 与 CLI 入口共用诊断，失败后回到菜单
+            from novelforge.cli_diagnostics import report_error
+
+            report_error(error)
+            print("返回任务菜单；已保存的项目仍可使用。", file=sys.stderr)

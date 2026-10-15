@@ -318,6 +318,8 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                 for phase in PHASES:
                     if phase in state["completed"]:
                         continue
+                    from novelforge.cli_diagnostics import phase as diagnostic_phase
+                    diagnostic_phase("整卷阶段", project=context.project.id, run=state["id"], stage=phase)
                     state.update(status="running", phase=phase)
                     save_state()
                     print(
@@ -409,9 +411,13 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                 )
             except (KeyboardInterrupt, asyncio.CancelledError):
                 state["status"] = "interrupted"
-                save_state()
+                from novelforge.cli_diagnostics import preserve_failure
+                with preserve_failure():
+                    save_state()
                 raise
-            except (ValueError, OSError, LLMError):
+            except Exception:
                 state["status"] = "failed"
-                save_state()
+                from novelforge.cli_diagnostics import preserve_failure
+                with preserve_failure():
+                    save_state()
                 raise
