@@ -108,7 +108,17 @@ API 地址与模型也可通过 `GENGBI_BASE_URL`、`GENGBI_MODEL` 设置。密�
 
 不指定 `--output` 时，UTF-8 正文写入标准输出，错误写入标准错误；`--input -` 接收管道中的前文。Windows PowerShell 的旧版本可能重新编码管道内容，中文文本建议直接使用 `--input 文件` 和 `--output 文件`。退出码：0 成功、1 请求或运行失败、2 输入 / 文件错误、130 用户中断。失败、中断、空正文或生成被 Token 上限截断时，不提交输出文件；默认不覆盖已有文件，文件提交使用同目录临时文件与原子链接（输出文件系统需支持硬链接，Windows NTFS / macOS APFS 均支持）。
 
-CLI 当前提供 **TXT → 下一章正文** 的无界面流程：复用桌面端的拆章、预设、宏、模板、正则与 API 客户端，不改写桌面项目数据库。预设变量在单次调用的临时目录中隔离；不自动读取项目专属世界书、角色档案或运行卷级交互流程。需要后续章节时，将前文与生成正文整理为下一次输入。
+TXT 续写复用桌面端的拆章、预设、宏、模板、正则与 API 客户端；预设变量在单次调用的临时目录中隔离。CLI 已接入项目章节、世界书、档案提取、项目续写、审稿修订、整卷、多阶段流程和资源管理。Windows 源码 CLI 77 项通过，独立 EXE 73 项通过、4 项源码专用检查跳过；完整验收与边界见 [CLI_PARITY.md](CLI_PARITY.md)。
+
+源码运行 `python -m novelforge.cli wizard` 可打开终端任务菜单，完整步骤见 [CLI_GUIDE.md](CLI_GUIDE.md)。已有文章可先提取世界书，再引用设定续写：
+
+```bash
+python -m novelforge.cli extract worldbook -i 小说.txt --name 小说设定 -o 世界书.json
+python -m novelforge.cli continue --project PROJECT_ID --worldbook WORLD_ID --dry-run
+python -m novelforge.cli continue --project PROJECT_ID --worldbook WORLD_ID --save -o 续写.txt
+```
+
+将 `PROJECT_ID`、`WORLD_ID` 替换为提取结果返回的实际 ID。提取会调用配置的模型；结果可以先用 `worldbooks show` 检查、用 `worldbooks save` 修改。底层世界观、主角/指定角色和文风有独立提取流程；运行 `python -m novelforge.cli guide extract` 查看完整步骤、长文分批和增量提取用法。
 
 Windows 控制台版为 `GengBi_CLI_v{版本号}.exe`，可将上述 `python -m novelforge.cli` 替换成它的路径；原 GUI `.exe` 的启动方式不变。macOS 使用相同 Python 入口；本次未进行 macOS 实机验证。
 

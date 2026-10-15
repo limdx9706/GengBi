@@ -100,7 +100,7 @@ class CustomAuditRuleService:
             return None
 
         api_key = self.config_manager.decrypt_api_key(ep.get("id", ""))
-        if not api_key:
+        if not api_key and not ep.get("allow_empty_key", False):
             logger.error("API Key 无效，无法结构化自定义设定")
             return None
 

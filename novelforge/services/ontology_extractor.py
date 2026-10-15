@@ -442,7 +442,7 @@ class OntologyExtractor:
             return None
 
         api_key = self.config_manager.decrypt_api_key(ep.get("id", ""))
-        if not api_key:
+        if not api_key and not ep.get("allow_empty_key", False):
             logger.error("API Key 无效，无法提取底层世界观")
             return None
 
@@ -700,8 +700,7 @@ class OntologyExtractor:
         - 若 ``project.worldbook_id`` 为空，创建新世界书命名为 "{项目名}-世界观底层"
         - 拆分 7 维度为 7 个 ContextEntry（category="plot_state"，
           content=维度 JSON 字符串）
-        - 当前实现简化：仅生成 worldbook_id 与构造内存条目，
-          实际世界书持久化由后续 UI 层接入 WorldBookService 完成后落地
+        - 使用 WorldBookService 持久化，更新提取维度并保留用户额外添加的条目
 
         Args:
             project: 项目对象
@@ -750,8 +749,16 @@ class OntologyExtractor:
             "已生成世界观底层世界书条目: worldbook_id=%s, %d 维度",
             worldbook_id, len(entries),
         )
-        # 注：实际世界书持久化由 WorldBookService 接入后落地
-        # 当前实现仅返回 worldbook_id，条目在内存构造完成供后续调用方使用
+        from novelforge.models.worldbook import WorldBook
+        from novelforge.services.worldbook_service import WorldBookService
+
+        service = WorldBookService(self.storage_service.storage_path)
+        book = service.load_worldbook(worldbook_id) or WorldBook(
+            id=worldbook_id, name=f"{project.name}-世界观底层"
+        )
+        generated_ids = {f"{worldbook_id}_{dim}" for dim in ONTOLOGY_DIMENSIONS}
+        book.entries = [entry for entry in book.entries if entry.uid not in generated_ids] + entries
+        service.save_worldbook(book)
         return worldbook_id
 
     # ===== 主流程：流式提取 =====

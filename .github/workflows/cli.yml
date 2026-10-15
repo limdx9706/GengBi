@@ -1,4 +1,4 @@
-name: CLI Windows
+name: CLI
 
 on:
   pull_request:
@@ -10,8 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  cli-windows:
-    runs-on: windows-latest
+  cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     env:
       PYTHONIOENCODING: utf-8
     steps:
@@ -25,8 +29,10 @@ jobs:
       - name: Test source CLI
         run: python -m pytest tests/test_cli.py -q
       - name: Build console executable
+        if: runner.os == 'Windows'
         run: python -m novelforge.resources.build --cli
       - name: Test packaged CLI
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $env:GENGBI_TEST_EXECUTABLE = (Get-ChildItem dist/GengBi_CLI_v*.exe | Select-Object -First 1).FullName

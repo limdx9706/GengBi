@@ -617,7 +617,7 @@ class LLMClient:
         self._apply_payload_extensions(payload, model)
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}),
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
@@ -984,7 +984,7 @@ class LLMClient:
         self._apply_payload_extensions(payload, model)
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}),
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
@@ -1163,7 +1163,7 @@ class LLMClient:
             LLMError: 请求失败
         """
         url = f"{self.base_url}/models"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         # 自定义 HTTP 头合并（GET /models 也可能需要自定义头）
         if self.extra_headers:
             headers.update(self.extra_headers)

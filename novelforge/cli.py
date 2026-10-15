@@ -34,6 +34,24 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--config", type=Path, help="桌面配置 JSON；默认读取 ~/.novelforge/config.json"
     )
+    from novelforge.cli_workspace import add_commands
+
+    add_commands(subparsers, common)
+    from novelforge.cli_projects import add_commands as add_project_commands
+
+    add_project_commands(subparsers, common)
+    from novelforge.cli_extract import add_commands as add_extract_commands
+
+    add_extract_commands(subparsers, common)
+    from novelforge.cli_volume import add_commands as add_volume_commands
+
+    add_volume_commands(subparsers, common)
+    from novelforge.cli_assets import add_commands as add_asset_commands
+
+    add_asset_commands(subparsers, common)
+    from novelforge.cli_audit import add_commands as add_audit_commands
+
+    add_audit_commands(subparsers, common)
     subparsers.add_parser(
         "endpoints", parents=[common], help="列出已保存端点（不显示密钥）"
     )
@@ -41,8 +59,31 @@ def build_parser() -> argparse.ArgumentParser:
     continuation = subparsers.add_parser(
         "continue", parents=[common], help="根据 TXT 前文续写下一章"
     )
+    source = continuation.add_mutually_exclusive_group(required=True)
+    source.add_argument("-i", "--input", help="输入 TXT 路径；- 表示标准输入")
+    source.add_argument("--project", help="已有项目 ID，读取正文及项目档案")
+    continuation.add_argument("--chapter", help="项目中的当前章节 ID，默认末章")
     continuation.add_argument(
-        "-i", "--input", required=True, help="输入 TXT 路径；- 表示标准输入"
+        "--save", action="store_true", help="将项目续写保存为候选版本"
+    )
+    continuation.add_argument(
+        "--lookback-context",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="注入回溯窗口内最近一次上下文提取结果",
+    )
+    continuation.add_argument(
+        "--lookback-characters",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="注入回溯窗口内最近的主角和自定义角色档案",
+    )
+    books = continuation.add_mutually_exclusive_group()
+    books.add_argument(
+        "--worldbook", action="append", help="世界书 ID，可重复；省略沿用已选世界书"
+    )
+    books.add_argument(
+        "--no-worldbooks", action="store_true", help="本次不注入已选世界书"
     )
     continuation.add_argument(
         "--encoding",
@@ -82,9 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="网络读取超时秒数，默认 300",
     )
     preset = continuation.add_mutually_exclusive_group()
-    preset.add_argument(
-        "--preset", default="default", help="已保存预设 ID，默认 default"
-    )
+    preset.add_argument("--preset", help="已保存预设 ID，默认项目绑定预设或 default")
     preset.add_argument("--preset-file", type=Path, help="赓笔或 SillyTavern 预设 JSON")
     continuation.add_argument(
         "--jailbreak",
@@ -178,13 +217,12 @@ def _write_output(text: str, output: Path | None, force: bool) -> None:
 
 async def _execute(args: argparse.Namespace) -> None:
     """编排输入输出；业务模块保持无 Qt 依赖。"""
-    from novelforge.services.headless import (
-        ContinuationOptions,
-        prepare_continuation,
-        read_config,
-        read_json,
-        resolve_connection,
-    )
+    if args.command not in {"continue", "endpoints", "presets"}:
+        from novelforge.cli_workspace import execute
+
+        await execute(args)
+        return
+    from novelforge.services.headless import read_config, read_json
 
     config = read_config(args.config)
     if args.command == "endpoints":
@@ -201,8 +239,52 @@ async def _execute(args: argparse.Namespace) -> None:
             rows[path.stem] = {"id": path.stem, "name": data.get("name", path.stem)}
         print(json.dumps(list(rows.values()), ensure_ascii=False, indent=2))
         return
+    if args.project:
+        from novelforge.cli_projects import storage_session
+
+        with storage_session(config) as storage:
+            await _continue(args, config, storage)
+    else:
+        await _continue(args, config)
+
+
+async def _continue(args: argparse.Namespace, config, storage=None) -> None:
+    """以相同组装链支持文件和项目，生成成功后才保存候选。"""
+    from novelforge.services.headless import (
+        ContinuationOptions,
+        prepare_continuation,
+        resolve_connection,
+    )
+
     _check_output(args)
-    text = _read_input(args.input, args.encoding)
+    context = None
+    if storage is not None:
+        from novelforge.cli_projects import load_writing_context
+        from novelforge.cli_workspace import check_output
+
+        context = await load_writing_context(storage, config, args)
+        text = "\n".join(c.content for c in context.chapters)
+        if args.output:
+            check_output(
+                args.output,
+                args.force,
+                config.config_path,
+                *[
+                    storage.get_chapter_file_path(context.project.id, c.id)
+                    for c in storage.list_chapters(context.project.id)
+                ],
+            )
+    else:
+        if (
+            args.chapter
+            or args.save
+            or args.lookback_context
+            or args.lookback_characters
+        ):
+            raise ValueError(
+                "--chapter/--save/--lookback-context/--lookback-characters 需要 --project"
+            )
+        text = _read_input(args.input, args.encoding)
     instruction = (
         args.prompt_file.read_text(encoding="utf-8-sig")
         if args.prompt_file
@@ -222,12 +304,19 @@ async def _execute(args: argparse.Namespace) -> None:
         decrypt=not args.dry_run,
     )
     if not args.dry_run and (not connection.base_url or not connection.model):
-        raise ValueError("请指定 API 地址和模型，或先在桌面端配置默认端点")
+        raise ValueError("请指定 API 地址和模型，或先运行 config setup 配置默认端点")
     defaults = config.get_continuation_settings()
     options = ContinuationOptions(
-        title=args.title or (Path(args.input).stem if args.input != "-" else "全文"),
+        title=args.title
+        or (
+            context.project.name
+            if context
+            else Path(args.input).stem
+            if args.input != "-"
+            else "全文"
+        ),
         instruction=instruction,
-        preset_id=args.preset,
+        preset_id=args.preset or (context.project.preset_id if context else "default"),
         preset_file=args.preset_file,
         jailbreak=args.jailbreak,
         temperature=args.temperature,
@@ -238,9 +327,14 @@ async def _execute(args: argparse.Namespace) -> None:
         apply_regex=args.regex
         if args.regex is not None
         else defaults.get("apply_regex", True),
+        worldbook_ids=()
+        if args.no_worldbooks
+        else tuple(args.worldbook)
+        if args.worldbook is not None
+        else None,
     )
     with prepare_continuation(
-        text, config, options, model=connection.model
+        text, config, options, model=connection.model, context=context
     ) as prepared:
         if args.dry_run:
             result = json.dumps(
@@ -263,6 +357,16 @@ async def _execute(args: argparse.Namespace) -> None:
                 else not config.is_prefer_non_stream()
             )
             result = await prepared.generate(connection, stream=stream)
+            if args.save:
+                from novelforge.cli_projects import save_candidate
+
+                version = save_candidate(
+                    storage, context, prepared, result, connection.model
+                )
+                print(
+                    f"已保存候选 {version.id}；接受为新章节：versions accept --chapter {context.current_chapter.id} {version.id}",
+                    file=sys.stderr,
+                )
     _write_output(result, args.output, args.force)
 
 
@@ -271,7 +375,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
-    args = build_parser().parse_args(argv)
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    if not arguments:
+        from novelforge.cli_workspace import show_guide
+
+        show_guide()
+        return 0
+    args = build_parser().parse_args(arguments)
     # API 错误体可能回显密钥或正文；CLI 只输出受控错误，不透传底层日志。
     logging.basicConfig(level=logging.CRITICAL)
     try:
@@ -280,7 +390,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         asyncio.run(_execute(args))
         return 0
     except KeyboardInterrupt:
-        print("已取消续写。", file=sys.stderr)
+        print("已取消当前任务。", file=sys.stderr)
         return 130
     except BrokenPipeError:
         # 避免 Python 退出时再次刷新已关闭管道，导致退出码被改写为 120。

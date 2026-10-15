@@ -93,6 +93,7 @@ def resolve_connection(
     proxy: str | None = None,
     timeout: float = 300.0,
     decrypt: bool = True,
+    flow_key: str = "single_continuation",
 ) -> Connection:
     """解析一次性覆盖；自定义 URL 不继承保存端点的密钥或 HTTP 头。"""
     if endpoint_id is not None and base_url is not None:
@@ -104,11 +105,11 @@ def resolve_connection(
     elif base_url is not None:
         endpoint = {}
     else:
-        endpoint = config.get_flow_endpoint("single_continuation") or {}
+        endpoint = config.get_flow_endpoint(flow_key) or {}
     resolved_model = model
     if resolved_model is None:
         resolved_model = (
-            config.get_flow_model("single_continuation")
+            config.get_flow_model(flow_key)
             if endpoint_id is None and base_url is None
             else endpoint.get("default_model", "")
         )
@@ -156,6 +157,19 @@ class ContinuationOptions:
     max_tokens: int | None = None
     max_context: int | None = None
     apply_regex: bool = True
+    worldbook_ids: tuple[str, ...] | None = None
+    exclude_current: bool = False
+
+
+@dataclass
+class WritingContext:
+    """完整项目的组装输入；保留章节实体和已加载的资料。"""
+
+    project: Any
+    chapters: list[Any]
+    current_chapter: Any
+    entries: list[Any] = field(default_factory=list)
+    lookback: dict[str, Any] = field(default_factory=dict)
 
 
 def _override_jailbreak(preset: WritingPreset, level: str | None) -> None:
@@ -217,6 +231,10 @@ class PreparedContinuation:
     template_engine: TemplateEngine
     metadata: dict[str, Any]
     apply_regex: bool
+    preset: WritingPreset
+    project_id: str = "cli"
+    raw_content: str = ""
+    context_entries: list[Any] = field(default_factory=list)
 
     async def generate(self, connection: Connection, *, stream: bool = True) -> str:
         """完整接收并处理正文；中断或不完整响应不作为成功结果返回。"""
@@ -232,11 +250,12 @@ class PreparedContinuation:
             await client.close()
         if finish != "stop" or not isinstance(content, str):
             raise LLMError("模型响应未正常完成，请调整输出上限或检查服务端")
+        self.raw_content = content
         result = post_process_content(
             content,
             regex_engine=self.regex_engine,
             template_engine=self.template_engine,
-            project_id="cli",
+            project_id=self.project_id,
             chapter_metadata=self.metadata,
             apply_regex=self.apply_regex,
         ).strip()
@@ -252,6 +271,7 @@ def prepare_continuation(
     options: ContinuationOptions,
     *,
     model: str = "",
+    context: WritingContext | None = None,
 ) -> Iterator[PreparedContinuation]:
     """在独立临时目录渲染预设，不修改桌面项目、预设或全局变量。"""
     if not text.strip():
@@ -345,17 +365,61 @@ def prepare_continuation(
             preset_regex = storage / "regex" / f"preset_{options.preset_id}.json"
             if preset_regex.exists():
                 scripts.extend(read_json(preset_regex))
+        if context is not None:
+            project_regex = storage / "projects" / context.project.id / "regex.json"
+            if project_regex.exists():
+                scripts.extend(read_json(project_regex))
         regex_engine.compile_scripts(
             [RegexScript.model_validate(item) for item in [*scripts, *embedded_scripts]]
         )
-        chapters = TxtImporter.split_text(
-            text,
-            "cli",
-            DEFAULT_CHAPTER_PATTERN,
-            False,
-            options.title,
+        chapters = (
+            context.chapters
+            if context is not None
+            else TxtImporter.split_text(
+                text,
+                "cli",
+                DEFAULT_CHAPTER_PATTERN,
+                False,
+                options.title,
+            )
         )
-        metadata = chapters[-1].metadata
+        current = context.current_chapter if context is not None else chapters[-1]
+        metadata = current.metadata
+        project_id = context.project.id if context is not None else "cli"
+        book_ids = options.worldbook_ids
+        if book_ids is None:
+            book_ids = tuple(config.get_selected_worldbook_ids())
+        entries: list[Any] = []
+        seen: set[str] = set()
+        if book_ids:
+            from novelforge.services.worldbook_service import WorldBookService
+
+            books = WorldBookService(storage)
+            for identifier in book_ids:
+                book = books.load_worldbook(identifier)
+                if book is None:
+                    raise ValueError(
+                        f"世界书不存在：{identifier}；请运行 worldbooks list 查询"
+                    )
+                if book.enabled:
+                    for entry in book.entries:
+                        if entry.enabled and entry.uid not in seen:
+                            entries.append(entry)
+                            seen.add(entry.uid)
+        if context is not None:
+            entries.extend(
+                e for e in context.entries if e.enabled and e.uid not in seen
+            )
+        extra: dict[str, Any] = {}
+        if context is not None:
+            extra = {
+                "world_ontology": context.project.world_ontology,
+                "style_profile": context.project.style_profile,
+                "custom_audit_rules": context.project.custom_audit_rules,
+                "protagonist_profile": current.protagonist_profile,
+                "custom_characters": current.custom_characters,
+                **context.lookback,
+            }
         template_engine = TemplateEngine(VariableStore(scratch))
         try:
             assembled = PromptAssembler(
@@ -364,16 +428,21 @@ def prepare_continuation(
             ).assemble(
                 preset=preset,
                 chapters=chapters,
-                current_chapter=chapters[-1],
+                current_chapter=current,
+                context_entries=entries,
                 model=model,
                 max_context=max_context,
                 max_tokens=max_tokens,
                 target_words=target,
                 lookback_chapters=lookback,
-                novel_profile={"title": options.title},
-                project_id="cli",
+                novel_profile=context.project.novel_profile
+                if context
+                else {"title": options.title},
+                project_id=project_id,
                 chapter_metadata=metadata,
                 user_input=options.instruction,
+                exclude_current=options.exclude_current,
+                **extra,
             )
             yield PreparedContinuation(
                 assembled,
@@ -382,6 +451,9 @@ def prepare_continuation(
                 template_engine,
                 metadata,
                 options.apply_regex,
+                preset,
+                project_id,
+                context_entries=entries,
             )
         finally:
             template_engine.shutdown()
