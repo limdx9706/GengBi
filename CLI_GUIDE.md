@@ -283,4 +283,6 @@ gengbi config test --error-format json --diagnostics-dir ".\diagnostics"
 
 退出码：`0` 成功，`1` 运行失败，`2` 参数/本地输入错误，`130` 用户中断。诊断文件写入失败不会覆盖最初原因。普通命令进度仍写 stderr，`--error-format json` 的最终记录为 `{"error": ...}`，成功但有提示为 `{"warning": ...}`；自动化程序应读取对应 JSON 记录，不应把全部 stderr 当作单个 JSON。
 
+`response_tool_calls` 表示模型返回了工具调用，写作命令需要正文文本；检查端点 `extra_payload` 中是否启用了 `tools/tool_choice/functions/function_call`。`unsupported_finish_reason` 表示服务商使用了不支持的结束标记；诊断保留经过脱敏和限长的 `finish_reason`，不会将其误报成网络中断。真正缺少结束标记时，`incomplete_response` 的详情会显示 `finish_reason: null`。
+
 旧版 CLI 没有保存足够的错误信息，不能仅凭旧的“模型请求未成功完成”还原失败原因；新版本在下一次失败时提供诊断。

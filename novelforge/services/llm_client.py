@@ -164,8 +164,12 @@ def validate_finish(finish: str | None) -> None:
         raise ResponseError("output_truncated", finish)
     if finish in {"content_filter", "safety", "blocked", "refusal"}:
         raise ResponseError("provider_filtered", finish)
+    if finish in {"tool_calls", "function_call"}:
+        raise ResponseError("response_tool_calls", finish)
     if finish != "stop":
-        raise ResponseError("incomplete_response")
+        raise ResponseError(
+            "unsupported_finish_reason" if finish else "incomplete_response", finish
+        )
 
 
 class LLMClient:

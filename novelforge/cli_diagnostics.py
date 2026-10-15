@@ -417,7 +417,7 @@ def describe(error: BaseException, seen: set[int] | None = None) -> Failure:
         reasons = {
             "output_truncated": (
                 "模型输出达到 Token 上限，响应被截断。",
-                "减小提取 --batch-tokens 或 --lookback；检查模型输出上限。",
+                "续写、审稿或流程可提高 --max-tokens；提取可减小 --batch-tokens 或 --lookback；不要超过模型输出上限。",
             ),
             "provider_filtered": (
                 "服务商以内容过滤标记终止响应。",
@@ -439,6 +439,14 @@ def describe(error: BaseException, seen: set[int] | None = None) -> Failure:
                 "模型响应中断或缺少正常结束标记。",
                 "检查服务状态及流式协议；可尝试 --no-stream。",
             ),
+            "response_tool_calls": (
+                "模型返回了工具调用，当前写作命令需要正文文本。",
+                "检查端点 extra_payload 中的 tools/tool_choice/functions/function_call，移除强制工具调用设置后重试。",
+            ),
+            "unsupported_finish_reason": (
+                "服务商返回了不支持的响应结束原因。",
+                "根据 finish_reason 核对服务商的 Chat Completions 协议；此响应不会保存为完整正文。",
+            ),
             "response_schema": (
                 "模型响应结构不符合 Chat Completions 协议。",
                 "核对 API 根地址和接口类型。",
@@ -449,20 +457,11 @@ def describe(error: BaseException, seen: set[int] | None = None) -> Failure:
             code = "response_schema"
         message, hint = reasons[code]
         finish = getattr(error, "finish_reason", None)
-        details = (
-            {"finish_reason": finish}
-            if finish
-            in {
-                "length",
-                "content_filter",
-                "stop",
-                "safety",
-                "blocked",
-                "refusal",
-                "done",
-            }
-            else {}
-        )
+        details = {}
+        if isinstance(finish, str):
+            details["finish_reason"] = provider_text(finish)[:120]
+        elif code == "incomplete_response":
+            details["finish_reason"] = None
         return Failure(code, message, hint, details=details)
     if isinstance(error, TimeoutError):
         return Failure(
