@@ -397,6 +397,7 @@ novelforge/
 - `continue` 支持 TXT/标准输入、桌面默认端点或环境变量、预设选择、采样参数、提示词预览与文件输出；`endpoints`/`presets` 提供可脚本化 JSON 清单。API 密钥仅从环境变量或桌面加密配置读取。
 - 参数优先级：显式参数 > 连接环境变量 > 保存的续写配置/预设。显式自定义 URL 不继承旧端点密钥、HTTP 头、请求扩展。
 - 预设与变量渲染位于一次性临时目录；PromptAssembler 优先复用已注入 TemplateEngine 的 variable_store，避免越过调用者指定的存储位置。
+- `continue --jailbreak off|low|mid|high|cot` 仅在内存覆盖本次预设的四个互斥 `nf_jb_*` 模块，同时更新 prompt.enabled 和首个全局 prompt_order 的 enabled；省略保持原值，off 同时禁用 nf_jb_prefill，其余等级保留预填充开关。所选模块或全局排序项缺失时在调用 API 前报错，不注入默认文本、不回写文件。
 - HTML 特征检测归入 `core/post_processor.py`；ContinuationWorker 保留 `_contains_html` 导入别名，解除核心模块反向依赖 Qt 的循环导入。
 - CLI 在完整生成并清理正文后提交输出，拒绝覆盖输入，默认不覆盖已有输出；不完整响应、失败与取消不提交文件。返回码 0/1/2/130 分别表示成功/运行失败/输入错误/用户中断。
 - `requirements-cli.txt` 包含非 Qt 依赖；`requirements.txt` 引用它并保留 PySide6。`build --cli` 生成 `GengBi_CLI_v{版本号}` 控制台程序，显式排除 Qt；默认 GUI 构建不变。

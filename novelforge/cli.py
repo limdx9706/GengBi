@@ -86,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--preset", default="default", help="已保存预设 ID，默认 default"
     )
     preset.add_argument("--preset-file", type=Path, help="赓笔或 SillyTavern 预设 JSON")
+    continuation.add_argument(
+        "--jailbreak",
+        choices=["off", "low", "mid", "high", "cot"],
+        help="本次破限等级；省略沿用预设，off 关闭破限及助手预填充",
+    )
     continuation.add_argument("--temperature", type=float, help="温度，0 到 2")
     continuation.add_argument("--target-words", type=int, help="目标字数，100 到 50000")
     continuation.add_argument(
@@ -224,6 +229,7 @@ async def _execute(args: argparse.Namespace) -> None:
         instruction=instruction,
         preset_id=args.preset,
         preset_file=args.preset_file,
+        jailbreak=args.jailbreak,
         temperature=args.temperature,
         target_words=args.target_words,
         lookback=args.lookback,

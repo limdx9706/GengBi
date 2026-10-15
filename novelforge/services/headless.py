@@ -18,6 +18,7 @@ from novelforge.core.regex_engine import RegexEngine
 from novelforge.core.template_engine import TemplateEngine
 from novelforge.core.variable_store import VariableStore
 from novelforge.models import WritingPreset
+from novelforge.models.preset import GLOBAL_CHARACTER_ID
 from novelforge.models.regex import RegexScript
 from novelforge.services.importer import DEFAULT_CHAPTER_PATTERN, TxtImporter
 from novelforge.services.llm_client import LLMClient, LLMError
@@ -148,12 +149,45 @@ class ContinuationOptions:
     instruction: str = ""
     preset_id: str = "default"
     preset_file: Path | None = None
+    jailbreak: str | None = None
     temperature: float | None = None
     target_words: int | None = None
     lookback: int | None = None
     max_tokens: int | None = None
     max_context: int | None = None
     apply_regex: bool = True
+
+
+def _override_jailbreak(preset: WritingPreset, level: str | None) -> None:
+    """仅调整本次加载的预设模块，同时覆盖组装器优先读取的排序开关。"""
+    if level is None:
+        return
+    levels = {"low", "mid", "high", "cot"}
+    if level not in levels | {"off"}:
+        raise ValueError("破限等级必须为 off、low、mid、high 或 cot")
+    selected = f"nf_jb_{level}"
+    group = next(
+        (g for g in preset.prompt_order if g.character_id == GLOBAL_CHARACTER_ID),
+        None,
+    )
+    if level != "off" and (
+        not any(p.identifier == selected for p in preset.prompts)
+        or group is None
+        or not any(e.identifier == selected for e in group.order)
+    ):
+        raise ValueError(
+            f"预设缺少破限模块 {selected} 或其全局排序项；请使用包含该模块的预设"
+        )
+    controlled = {f"nf_jb_{item}" for item in levels}
+    if level == "off":
+        controlled.add("nf_jb_prefill")
+    for prompt in preset.prompts:
+        if prompt.identifier in controlled:
+            prompt.enabled = prompt.identifier == selected
+    if group is not None:
+        for entry in group.order:
+            if entry.identifier in controlled:
+                entry.enabled = entry.identifier == selected
 
 
 def _number(
@@ -242,6 +276,7 @@ def prepare_continuation(
             preset = WritingPreset.model_validate(read_json(path))
         if not preset.prompts:
             raise ValueError("预设必须包含提示词")
+        _override_jailbreak(preset, options.jailbreak)
         defaults = config.get_continuation_settings()
         generation = preset.generation_params
         temperature = _number(

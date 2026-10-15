@@ -83,6 +83,7 @@ API 地址与模型也可通过 `GENGBI_BASE_URL`、`GENGBI_MODEL` 设置。密�
 | `--config PATH` | 在子命令后指定桌面配置；默认读取 `~/.novelforge/config.json` |
 | `--endpoint ID` / `--model NAME` | 选择已保存端点、覆盖模型 |
 | `--preset ID` / `--preset-file PATH` | 已保存预设或赓笔 / SillyTavern JSON 预设 |
+| `--jailbreak off\|low\|mid\|high\|cot` | 本次破限模块：关闭 / 低 / 中 / 高 / 思维链；省略沿用预设 |
 | `--prompt TEXT` / `--prompt-file PATH` | 本次续写要求；指令文件使用 UTF-8 |
 | `--lookback N` | 最近 N 章，包含末章；0 表示全部前文 |
 | `--temperature N` / `--target-words N` | 温度 0–2；目标字数 100–50000（非硬性字数保证） |
@@ -96,6 +97,14 @@ API 地址与模型也可通过 `GENGBI_BASE_URL`、`GENGBI_MODEL` 设置。密�
 | `--force` | 允许替换已有输出文件；始终禁止覆盖显式指定的输入文件 |
 
 参数优先级为命令行覆盖、环境变量（连接信息）、已保存配置 / 预设默认值。温度、目标字数和回溯数继承桌面续写默认值；输出 Token 上限、top_p、频率与存在惩罚来自预设。
+
+直接选择本次破限等级，无需在桌面修改预设（沿用已配置的 API 端点）：
+
+```powershell
+.\GengBi_CLI_v0.2.22.exe continue -i "前文.txt" -o "续写.txt" --jailbreak high
+```
+
+源码入口同样支持 `python -m novelforge.cli continue -i 前文.txt --jailbreak high`，加 `--dry-run` 可查看组装后的请求。指定 `low` / `mid` / `high` / `cot` 时，仅启用当前预设对应的 `nf_jb_*` 模块并关闭另外三个互斥模块，助手预填充沿用预设；`off` 关闭这四个模块及 `nf_jb_prefill`。不传参数时完全沿用预设开关。此覆盖仅对本次调用生效，不改写预设或配置，也不会移除自定义预设其他位置的文本。自定义预设需包含所选模块及全局 `prompt_order` 排序项，否则在请求前报错；不会自动注入其他预设的文本。
 
 不指定 `--output` 时，UTF-8 正文写入标准输出，错误写入标准错误；`--input -` 接收管道中的前文。Windows PowerShell 的旧版本可能重新编码管道内容，中文文本建议直接使用 `--input 文件` 和 `--output 文件`。退出码：0 成功、1 请求或运行失败、2 输入 / 文件错误、130 用户中断。失败、中断、空正文或生成被 Token 上限截断时，不提交输出文件；默认不覆盖已有文件，文件提交使用同目录临时文件与原子链接（输出文件系统需支持硬链接，Windows NTFS / macOS APFS 均支持）。
 

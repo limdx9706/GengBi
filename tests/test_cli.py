@@ -510,3 +510,187 @@ def test_invalid_config_has_controlled_error(cli, data):
     result = cli("endpoints", "--config", cli.config)
     assert result.returncode == 2
     assert "Traceback" not in result.stderr
+
+
+@pytest.fixture
+def jailbreak_preset(tmp_path):
+    """用中性标记验证模块选择，故意让提示开关与排序开关冲突。"""
+    identifiers = [
+        f"nf_jb_{level}" for level in ("low", "mid", "high", "cot", "prefill")
+    ]
+    data = {
+        "id": "test-jailbreak",
+        "name": "模块选择测试",
+        "generation_params": {},
+        "prompts": [
+            {
+                "identifier": identifier,
+                "content": f"CHECK_{identifier}",
+                "enabled": False,
+            }
+            for identifier in identifiers
+        ]
+        + [{"identifier": "main", "content": "KEEP_MAIN"}],
+        "prompt_order": [
+            {
+                "character_id": 100000,
+                "order": [
+                    {"identifier": identifier, "enabled": True}
+                    for identifier in [*identifiers, "main"]
+                ],
+            }
+        ],
+    }
+    path = tmp_path / "模块 预设.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("level", [None, "off", "low", "mid", "high", "cot"])
+def test_jailbreak_override_reaches_http_without_changing_preset(
+    cli, api, jailbreak_preset, level
+):
+    before = jailbreak_preset.read_bytes(), cli.config.read_bytes()
+    override = [] if level is None else ["--jailbreak", level]
+    result = cli(
+        "continue",
+        "-i",
+        cli.story,
+        "--config",
+        cli.config,
+        "--preset-file",
+        jailbreak_preset,
+        "--base-url",
+        api["url"],
+        "--model",
+        "test",
+        *override,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == BODY
+    messages = json.dumps(api["requests"][0][1]["messages"])
+    for candidate in ("low", "mid", "high", "cot"):
+        assert (f"CHECK_nf_jb_{candidate}" in messages) == (
+            level is None or level == candidate
+        )
+    assert ("CHECK_nf_jb_prefill" in messages) == (level != "off")
+    assert "KEEP_MAIN" in messages
+    assert (jailbreak_preset.read_bytes(), cli.config.read_bytes()) == before
+
+
+@pytest.mark.parametrize("source", ["saved", "st"])
+def test_jailbreak_supports_saved_and_st_presets(cli, jailbreak_preset, source):
+    data = json.loads(jailbreak_preset.read_text(encoding="utf-8"))
+    if source == "saved":
+        directory = cli.storage / "presets"
+        directory.mkdir()
+        path = directory / "test-jailbreak.json"
+        selection = ["--preset", "test-jailbreak"]
+    else:
+        data.pop("generation_params")
+        path = jailbreak_preset
+        selection = ["--preset-file", path]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    before = {
+        p.relative_to(cli.home): p.read_bytes()
+        for p in cli.home.rglob("*")
+        if p.is_file()
+    }
+    original = path.read_bytes()
+    result = cli(
+        "continue",
+        "-i",
+        cli.story,
+        "--config",
+        cli.config,
+        *selection,
+        "--jailbreak",
+        "mid",
+        "--dry-run",
+    )
+    assert result.returncode == 0, result.stderr
+    messages = json.dumps(json.loads(result.stdout)["messages"])
+    assert "CHECK_nf_jb_mid" in messages and "CHECK_nf_jb_high" not in messages
+    assert path.read_bytes() == original
+    assert {
+        p.relative_to(cli.home): p.read_bytes()
+        for p in cli.home.rglob("*")
+        if p.is_file()
+    } == before
+
+
+@pytest.mark.parametrize("level", ["off", "low", "mid", "high", "cot"])
+def test_jailbreak_builtin_preset(cli, level):
+    data = json.loads(
+        (ROOT / "novelforge/resources/defaults/default_preset.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    result = cli(
+        "continue",
+        "-i",
+        cli.story,
+        "--config",
+        cli.config,
+        "--jailbreak",
+        level,
+        "--dry-run",
+    )
+    assert result.returncode == 0, result.stderr
+    messages = "\n".join(
+        item["content"] for item in json.loads(result.stdout)["messages"]
+    )
+    for prompt in data["prompts"]:
+        if prompt["identifier"] in {
+            "nf_jb_low",
+            "nf_jb_mid",
+            "nf_jb_high",
+            "nf_jb_cot",
+        }:
+            assert (prompt["content"] in messages) == (
+                prompt["identifier"] == f"nf_jb_{level}"
+            )
+
+
+@pytest.mark.parametrize("missing", ["prompt", "entry", "group"])
+def test_jailbreak_missing_module_fails_before_request(
+    cli, api, jailbreak_preset, missing
+):
+    data = json.loads(jailbreak_preset.read_text(encoding="utf-8"))
+    if missing == "prompt":
+        data["prompts"] = [
+            p for p in data["prompts"] if p["identifier"] != "nf_jb_high"
+        ]
+    elif missing == "entry":
+        data["prompt_order"][0]["order"] = [
+            p
+            for p in data["prompt_order"][0]["order"]
+            if p["identifier"] != "nf_jb_high"
+        ]
+    else:
+        data["prompt_order"][0]["character_id"] = 42
+    jailbreak_preset.write_text(json.dumps(data), encoding="utf-8")
+    result = cli(
+        "continue",
+        "-i",
+        cli.story,
+        "--config",
+        cli.config,
+        "--preset-file",
+        jailbreak_preset,
+        "--jailbreak",
+        "high",
+        "--base-url",
+        api["url"],
+        "--model",
+        "test",
+    )
+    assert result.returncode == 2
+    assert "nf_jb_high" in result.stderr and "Traceback" not in result.stderr
+    assert not api["requests"]
+
+
+def test_jailbreak_invalid_level(cli):
+    result = cli("continue", "-i", cli.story, "--jailbreak", "invalid", "--dry-run")
+    assert result.returncode == 2
+    assert "--jailbreak" in result.stderr and "Traceback" not in result.stderr
