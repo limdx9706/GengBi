@@ -355,6 +355,7 @@ async def _continue(args: argparse.Namespace, config, storage=None) -> None:
             result = json.dumps(
                 {
                     "model": connection.model,
+                    "model_prompt": connection.prompt_summary(),
                     "parameters": prepared.parameters,
                     "messages": prepared.assembled.messages,
                     "history_chapter_count": prepared.assembled.history_chapter_count,

@@ -147,6 +147,7 @@ class VolumeLogic:
         proxy: str | None = None,
         prefer_non_stream: bool = False,
         parent=None,
+        model_prompts: dict[str, str] | None = None,
     ) -> None:
         """初始化卷级编排器。
 
@@ -193,6 +194,7 @@ class VolumeLogic:
         # 自定义请求扩展（透传给 LLMClient）
         self.extra_payload: dict = extra_payload or {}
         self.extra_headers: dict = extra_headers or {}
+        self.model_prompts = model_prompts if model_prompts is not None else {}
         self.merge_system_messages = coerce_merge_system_messages(merge_system_messages)
         # 网络代理（透传给 LLMClient）
         self.proxy = proxy
@@ -382,6 +384,7 @@ class VolumeLogic:
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
                 extra_payload=self._debug_override_endpoint.get("extra_payload") or {},
                 extra_headers=self._debug_override_endpoint.get("extra_headers") or {},
+                model_prompts=self._debug_override_endpoint.get("model_prompts", {}),
                 merge_system_messages=coerce_merge_system_messages(
                     self._debug_override_endpoint.get(
                         "merge_system_messages", self.merge_system_messages
@@ -468,6 +471,7 @@ class VolumeLogic:
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
                 extra_payload=self.extra_payload,
                 extra_headers=self.extra_headers,
+                model_prompts=self.model_prompts,
                 merge_system_messages=self.merge_system_messages,
                 proxy=self.proxy,
             )

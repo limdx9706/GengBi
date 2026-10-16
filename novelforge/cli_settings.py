@@ -8,10 +8,18 @@ from typing import Any
 
 from novelforge.cli_workspace import emit, require
 
-ACTIONS = {"settings", "endpoint-options", "copy", "set-jailbreak"}
+ACTIONS = {"settings", "endpoint-options", "copy", "set-jailbreak", "model-prompt"}
 
 
 def add_commands(actions: Any, common: argparse.ArgumentParser) -> None:
+    model_prompt = actions.add_parser(
+        "model-prompt", parents=[common], help="按端点和完整模型 ID 查看、设置或清除附加 system 提示词"
+    )
+    model_prompt.add_argument("--endpoint", required=True, help="端点 ID")
+    model_prompt.add_argument("--model", required=True, help="完整模型 ID，区分大小写，不支持通配符")
+    change = model_prompt.add_mutually_exclusive_group()
+    change.add_argument("-i", "--input", type=Path, help="UTF-8 提示词文件；省略只查看")
+    change.add_argument("--clear", action="store_true", help="删除该模型的附加提示词")
     settings = actions.add_parser(
         "settings",
         parents=[common],
@@ -67,6 +75,23 @@ def execute(args: argparse.Namespace, config: Any) -> None:
     from novelforge.services.headless import _number
     from novelforge.utils.ids import validate_id
 
+    if args.action == "model-prompt":
+        from novelforge.services.model_prompts import prompt_summary, validate_model_prompts
+
+        endpoint = require(config.get_endpoint(args.endpoint), "端点")
+        if not args.model.strip() or args.model != args.model.strip():
+            raise ValueError("模型 ID 不能为空或含首尾空格")
+        prompts = validate_model_prompts(endpoint.get("model_prompts", {}))
+        if args.input:
+            prompts[args.model] = args.input.read_text(encoding="utf-8-sig")
+            validate_model_prompts(prompts)
+        elif args.clear:
+            prompts.pop(args.model, None)
+        if args.input or args.clear:
+            config.update_endpoint(args.endpoint, {"model_prompts": prompts})
+        emit({"endpoint": args.endpoint, "saved": bool(args.input or args.clear),
+              **prompt_summary(prompts, args.model)})
+        return
     if args.action == "copy":
         validate_id(args.id)
         if config.get_endpoint(args.id):
@@ -164,6 +189,7 @@ def execute(args: argparse.Namespace, config: Any) -> None:
                     key: endpoint.get(key)
                     for key in sorted(allowed - {"extra_headers", "extra_payload"})
                 },
+                "model_prompt_models": sorted(endpoint.get("model_prompts", {})),
                 "extra_header_keys": sorted(
                     (endpoint.get("extra_headers") or {}).keys()
                 ),

@@ -475,6 +475,7 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                                 "plan": plan,
                                 "next_stage": stage.id,
                                 "model": connection.model,
+                                "model_prompt": connection.prompt_summary(),
                                 "messages": messages
                                 if stage.agent in {"audit", "continuation"}
                                 else [],

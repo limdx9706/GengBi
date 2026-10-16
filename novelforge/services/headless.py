@@ -50,6 +50,9 @@ def read_config(path: Path | None = None) -> ConfigManager:
             not isinstance(endpoint, dict) for endpoint in endpoints
         ):
             raise ValueError("配置项 api_endpoints 必须是端点对象列表")
+        from novelforge.services.model_prompts import validate_model_prompts
+        for endpoint in endpoints:
+            validate_model_prompts(endpoint.get("model_prompts", {}))
         manager.config = manager._merge_defaults(data)
     return manager
 
@@ -67,6 +70,11 @@ class Connection:
     extra_payload: dict[str, Any] = field(default_factory=dict, repr=False)
     extra_headers: dict[str, str] = field(default_factory=dict, repr=False)
     timeout: float = 300.0
+    model_prompts: dict[str, str] = field(default_factory=dict, repr=False)
+
+    def prompt_summary(self) -> dict:
+        from novelforge.services.model_prompts import prompt_summary
+        return prompt_summary(self.model_prompts, self.extra_payload.get("model", self.model))
 
     def client(self) -> LLMClient:
         """创建与桌面端行为一致的 API 客户端。"""
@@ -82,6 +90,7 @@ class Connection:
             merge_system_messages=self.merge_system_messages,
             extra_payload=self.extra_payload,
             extra_headers=self.extra_headers,
+            model_prompts=self.model_prompts,
             timeout=self.timeout,
         )
 
@@ -143,6 +152,7 @@ def resolve_connection(
         merge_system_messages=endpoint.get("merge_system_messages", False),
         extra_payload=endpoint.get("extra_payload") or {},
         extra_headers=endpoint.get("extra_headers") or {},
+        model_prompts=endpoint.get("model_prompts", {}),
     )
 
 

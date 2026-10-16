@@ -468,6 +468,7 @@ class OntologyExtractor:
             reasoning_effort=reasoning_effort,
             extra_payload=extra_payload,
             extra_headers=extra_headers,
+            model_prompts=ep.get("model_prompts", {}),
             merge_system_messages=merge_system_messages,
             proxy=proxy,
         )

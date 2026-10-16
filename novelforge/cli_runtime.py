@@ -44,13 +44,15 @@ def resource_fingerprint(prepared: Any) -> str:
 
 async def preview_volume_request(engine: Any) -> dict:
     """在共享引擎的发送前暂停点捕获首个请求，不建立 API 连接。"""
+    from novelforge.services.model_prompts import prompt_summary
     captured = []
     engine.debug_mode = True
     engine.checkpoint_reached.connect(lambda _name, _artifact: engine.resume(None))
 
     def capture(phase, messages, _endpoint, model):
         captured.append(
-            {"phase": phase, "model": model, "messages": json.loads(messages)}
+            {"phase": phase, "model": model, "messages": json.loads(messages),
+             "model_prompt": prompt_summary(engine.model_prompts, engine.extra_payload.get("model", model))}
         )
         raise asyncio.CancelledError
 
@@ -205,6 +207,7 @@ def create_volume_engine(
         phase_inputs=inputs,
         extra_payload=connection.extra_payload,
         extra_headers=connection.extra_headers,
+        model_prompts=connection.model_prompts,
         merge_system_messages=connection.merge_system_messages,
         proxy=connection.proxy,
         prefer_non_stream=prefer_non_stream,

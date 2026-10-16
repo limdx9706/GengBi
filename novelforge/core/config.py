@@ -358,6 +358,7 @@ class ConfigManager:
             endpoint.setdefault("merge_system_messages", False)
             endpoint.setdefault("extra_payload", {})
             endpoint.setdefault("extra_headers", {})
+            endpoint.setdefault("model_prompts", {})
 
             self.config.setdefault("api_endpoints", []).append(endpoint)
             # 若无默认端点，设为第一个

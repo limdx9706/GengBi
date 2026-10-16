@@ -72,6 +72,22 @@ gengbi config settings network -i 代理设置.json
 
 `--config 路径` 放在具体操作之后，如 `gengbi config show --config 配置.json`。默认配置与桌面端共用 `~/.novelforge/config.json`；配置中的 `data.storage_path` 指定数据目录。
 
+### 按模型附加提示词
+
+`config model-prompt` 按“端点 ID + 完整模型 ID”保存额外的任务说明。默认不启用，也不会预置任何附加文本。将自己需要的说明保存为 UTF-8 TXT 后执行：
+
+```powershell
+gengbi config model-prompt --endpoint teamorouter --model gemini-4-argon -i ".\模型附加提示词.txt"
+gengbi config model-prompt --endpoint teamorouter --model gemini-4-argon
+gengbi config model-prompt --endpoint teamorouter --model gemini-4-argon --clear
+```
+
+第一条设置，第二条查看原文，第三条清除。模型名称区分大小写、精确匹配，没有厂商推断或通配规则；同一端点的其他模型不受影响。文本作为额外 system 消息插在最后一条原 system 消息后，不替换原版提取提示词、正文或预设。开启端点的 `merge_system_messages` 时，发送前会合并 system 消息。`extra_payload` 覆盖模型或消息时，按最终模型匹配，再附加文本。
+
+该设置作用于此端点和模型的所有生成请求，包括连接测试、提取、续写、审稿、整卷和流程各阶段。只想用于世界书提取，可复制端点、对副本设置提示词，再用 `config set-flow context_extraction --endpoint 副本ID` 绑定。命令的 `--model` 覆盖也参与匹配；`continue --base-url` 不继承保存端点的附加提示词。
+
+`--dry-run` 的 `messages` 仍是原流程组装结果，`model_prompt` 单独显示将在发送时附加的文本，不会调用模型。修改提示词后重新提取已有文章时加 `--refresh`，避免复用已有缓存；已完成的流程阶段不会自动重新运行。配置仅影响模型输入，不保证模型遵循或服务商接受请求。旧版桌面 EXE 不具备此功能，需要包含本改动的版本。
+
 ## 3. 已有文章 → 世界书 → 续写
 
 ```text

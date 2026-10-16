@@ -148,6 +148,7 @@ def operation_config(config: Any, flow: str, args: argparse.Namespace):
         "allow_empty_key": not connection.api_key,
         "reasoning_effort": connection.reasoning_effort,
         "extra_headers": connection.extra_headers,
+        "model_prompts": connection.model_prompts,
         "extra_payload": connection.extra_payload,
         "merge_system_messages": connection.merge_system_messages,
     }

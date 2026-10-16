@@ -205,6 +205,7 @@ async def execute(args: argparse.Namespace, config: Any) -> None:
                 result = json.dumps(
                     {
                         "model": connection.model,
+                        "model_prompt": connection.prompt_summary(),
                         "messages": messages,
                         "max_tokens": args.max_tokens,
                     },

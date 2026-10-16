@@ -195,6 +195,7 @@ class LLMClient:
         extra_headers: dict | None = None,
         proxy: str | None = None,
         merge_system_messages: bool | str | None = None,
+        model_prompts: dict[str, str] | None = None,
     ) -> None:
         """初始化 LLM 客户端。
 
@@ -234,6 +235,8 @@ class LLMClient:
         # 自定义扩展：payload 字段 deep merge，HTTP 头 update
         self.extra_payload: dict = extra_payload or {}
         self.extra_headers: dict = extra_headers or {}
+        from novelforge.services.model_prompts import validate_model_prompts
+        self.model_prompts = validate_model_prompts({} if model_prompts is None else model_prompts)
         # HTTP/HTTPS 代理 URL（None 表示不走代理）
         self.proxy = proxy.strip() if proxy and proxy.strip() else None
         # 合并 system：默认不合并，由端点选项显式开启
@@ -597,6 +600,17 @@ class LLMClient:
         if self.extra_payload:
             _deep_merge_dict(payload, self.extra_payload)
         self._sanitize_qwen_thinking_params(payload, model)
+        # 以扩展合并后的实际模型为准，避免 extra_payload 覆盖消息或模型时漏加/错加。
+        prompt = self.model_prompts.get(payload.get("model"), "")
+        if prompt:
+            messages = payload.get("messages")
+            if not isinstance(messages, list) or any(not isinstance(m, dict) for m in messages):
+                raise ValueError("启用模型附加提示词时，messages 必须是消息对象列表")
+            messages = [dict(message) for message in messages]
+            # 放在最后一条原 system 消息之后，保持原提示词和用户正文不变。
+            position = max((i + 1 for i, m in enumerate(messages) if m.get("role") == "system"), default=0)
+            messages.insert(position, {"role": "system", "content": prompt})
+            payload["messages"] = self._prepare_messages_for_model(messages, payload["model"])
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取复用的 aiohttp.ClientSession（懒加载）。
